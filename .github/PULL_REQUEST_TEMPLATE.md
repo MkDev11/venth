@@ -14,6 +14,8 @@
 - [ ] Other (describe below)
 
 > **Adding a new tool?** Use the [New Tool PR template](?template=new_tool.md) instead.
+>
+> **Just have an idea?** Use the [Tool Proposal template](?template=tool_proposal.md) to submit a technical document only — no code needed.
 
 ## Testing
 

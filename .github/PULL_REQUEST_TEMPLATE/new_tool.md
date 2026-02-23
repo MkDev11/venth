@@ -13,9 +13,9 @@ about: Submit a new tool for the Venth project
 
 ## Technical Document
 
-<!-- REQUIRED: Attach or paste the 1-page technical document for this tool below.
-     This is a hackathon submission requirement — PRs for new tools will not be
-     merged without it.
+<!-- REQUIRED: The 1-page technical document must be included as README.md inside
+     your tool's subfolder (tools/your-tool/README.md). This is a hackathon
+     submission requirement — PRs for new tools will not be merged without it.
 
      The document should cover:
      - What the tool does and the problem it solves
@@ -36,7 +36,8 @@ about: Submit a new tool for the Venth project
 
 ## Checklist
 
-- [ ] **1-page technical document included**
-- [ ] Tool is documented in README
+- [ ] **1-page technical document at `tools/<tool-name>/README.md`**
+- [ ] Tool lives in its own subfolder under `tools/`
+- [ ] Tool is listed in the root README
 - [ ] Code follows project style guidelines
 - [ ] Self-review completed

@@ -8,9 +8,20 @@ This project is developed using [Gittensor](https://subnetalpha.ai/subnet/gitten
 
 Venth is a collection of developer tools that extend and integrate with the Synth subnet's forecasting capabilities. The project is being built as a submission to the [Synth Hackathon](https://dashboard.synthdata.co/hackathon/).
 
+## Project Structure
+
+```
+tools/
+  tool-name/       # Each tool lives in its own subfolder
+    README.md      # 1-page technical document (required)
+    ...
+```
+
 ## Tools
 
-_Coming soon_ — tools and features will be documented here as they are developed.
+Each tool is a self-contained subfolder under `tools/`. New tools must include a 1-page technical document as `README.md` within their subfolder.
+
+_Coming soon_ — tools will be listed here as they are developed.
 
 ## Contributing
 
@@ -24,8 +35,9 @@ To contribute:
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/your-feature`)
-3. Commit your changes
-4. Push to the branch and open a pull request
+3. Add your tool as a new subfolder under `tools/` (e.g. `tools/my-tool/`)
+4. Include a 1-page technical document as `tools/my-tool/README.md`
+5. Commit your changes and open a pull request using the [New Tool template](../../.github/PULL_REQUEST_TEMPLATE/new_tool.md)
 
 ## Links
 
