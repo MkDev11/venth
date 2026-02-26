@@ -37,6 +37,27 @@ def test_edge_daily(client):
     assert data["signal"] in ("underpriced", "overpriced", "fair")
     assert data["strength"] in ("strong", "moderate", "none")
     assert data["horizon"] == "24h"
+    assert "edge_1h_pct" in data
+    assert "edge_24h_pct" in data
+    assert "signal_1h" in data
+    assert "signal_24h" in data
+    assert "no_trade_warning" in data
+    assert "confidence_score" in data
+    assert 0 <= data["confidence_score"] <= 1
+    assert "explanation" in data
+    assert len(data["explanation"]) > 10
+    assert "invalidation" in data
+    assert len(data["invalidation"]) > 10
+
+
+def test_edge_hourly_uses_hourly_primary_fields(client):
+    resp = client.get("/api/edge?slug=bitcoin-up-or-down-february-25-6pm-et")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["horizon"] == "1h"
+    assert data["slug"] == "bitcoin-up-or-down-february-25-6pm-et"
+    assert data["synth_probability_up"] == 0.0004
+    assert data["polymarket_probability_up"] == 0.006500000000000001
 
 
 def test_edge_missing_slug(client):
@@ -49,9 +70,32 @@ def test_edge_unsupported_slug(client):
     assert resp.status_code == 404
 
 
+def test_edge_pattern_matched_but_unavailable_slug_404(client):
+    resp = client.get("/api/edge?slug=btc-up-or-down-on-march-1")
+    assert resp.status_code == 404
+
+
 def test_edge_range(client):
     resp = client.get("/api/edge?slug=bitcoin-price-on-february-26")
     assert resp.status_code == 200
     data = resp.get_json()
     assert "edge_pct" in data
     assert "bracket_title" in data
+    assert "no_trade_warning" in data
+    assert "range_brackets" in data
+    assert isinstance(data["range_brackets"], list)
+    assert len(data["range_brackets"]) > 1
+
+
+def test_edge_range_respects_bracket_title(client):
+    resp = client.get(
+        "/api/edge?slug=bitcoin-price-on-february-26&bracket_title=%5B68000%2C%2070000%5D"
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["bracket_title"] == "[68000, 70000]"
+
+
+def test_edge_range_unknown_slug_404(client):
+    resp = client.get("/api/edge?slug=bitcoin-price-on-february-26-nonexistent")
+    assert resp.status_code == 404

@@ -10,6 +10,9 @@ from edge import (
     compute_edge_pct,
     signal_from_edge,
     strength_from_edge,
+    signals_conflict,
+    strength_from_horizons,
+    uncertainty_high_from_percentiles,
     edge_from_daily_or_hourly,
     edge_from_range_bracket,
 )
@@ -84,3 +87,47 @@ def test_edge_from_range_bracket():
     assert edge_pct == -1.8
     assert signal == "overpriced"
     assert strength == "moderate"
+
+
+def test_signals_conflict():
+    assert signals_conflict("underpriced", "overpriced") is True
+    assert signals_conflict("overpriced", "underpriced") is True
+    assert signals_conflict("underpriced", "underpriced") is False
+    assert signals_conflict("fair", "overpriced") is False
+    assert signals_conflict("underpriced", "fair") is False
+
+
+def test_strength_from_horizons_aligned_strong():
+    assert strength_from_horizons(4.0, 5.0) == "strong"
+
+
+def test_strength_from_horizons_aligned_moderate():
+    assert strength_from_horizons(1.5, 2.0) == "moderate"
+
+
+def test_strength_from_horizons_conflicting_none():
+    assert strength_from_horizons(3.0, -3.0) == "none"
+
+
+def test_strength_from_horizons_weak_none():
+    assert strength_from_horizons(0.3, 0.4) == "none"
+
+
+def test_uncertainty_high_from_percentiles_wide_spread():
+    data = {
+        "current_price": 100.0,
+        "forecast_future": {
+            "percentiles": [{"0.05": 90.0, "0.95": 115.0}],
+        },
+    }
+    assert uncertainty_high_from_percentiles(data, relative_spread_threshold=0.05) is True
+
+
+def test_uncertainty_high_from_percentiles_narrow_spread():
+    data = {
+        "current_price": 100.0,
+        "forecast_future": {
+            "percentiles": [{"0.05": 99.0, "0.95": 101.0}],
+        },
+    }
+    assert uncertainty_high_from_percentiles(data, relative_spread_threshold=0.05) is False

@@ -7,9 +7,6 @@ MARKET_DAILY = "daily"
 MARKET_HOURLY = "hourly"
 MARKET_RANGE = "range"
 
-# Slugs in mock data; real API would return data for the requested market.
-MOCK_DAILY_SLUG = "bitcoin-up-or-down-on-february-26"
-MOCK_HOURLY_SLUG = "bitcoin-up-or-down-february-25-6pm-et"
 MOCK_RANGE_SLUG_PREFIX = "bitcoin-price-on-"
 
 
@@ -39,10 +36,6 @@ def get_market_type(slug: str) -> Literal["daily", "hourly", "range"] | None:
         return MARKET_DAILY
     if "price-on" in slug_lower or "price-on-" in slug_lower:
         return MARKET_RANGE
-    if slug_lower == MOCK_DAILY_SLUG:
-        return MARKET_DAILY
-    if slug_lower == MOCK_HOURLY_SLUG:
-        return MARKET_HOURLY
     if MOCK_RANGE_SLUG_PREFIX in slug_lower:
         return MARKET_RANGE
     return None
