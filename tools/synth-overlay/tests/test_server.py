@@ -70,9 +70,11 @@ def test_edge_unsupported_slug(client):
     assert resp.status_code == 404
 
 
-def test_edge_pattern_matched_but_unavailable_slug_404(client):
+def test_edge_pattern_matched_slug_supported(client):
     resp = client.get("/api/edge?slug=btc-up-or-down-on-march-1")
-    assert resp.status_code == 404
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["slug"] == "btc-up-or-down-on-march-1"
 
 
 def test_edge_range(client):

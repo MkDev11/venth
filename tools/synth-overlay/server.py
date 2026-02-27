@@ -61,13 +61,6 @@ def edge():
         if market_type in ("daily", "hourly"):
             daily_data = client.get_polymarket_daily()
             hourly_data = client.get_polymarket_hourly()
-            expected_daily_slug = (daily_data.get("slug") or "").strip().lower()
-            expected_hourly_slug = (hourly_data.get("slug") or "").strip().lower()
-            request_slug = slug.strip().lower()
-            if market_type == "daily" and request_slug != expected_daily_slug:
-                return jsonify({"error": "Unsupported market", "slug": slug}), 404
-            if market_type == "hourly" and request_slug != expected_hourly_slug:
-                return jsonify({"error": "Unsupported market", "slug": slug}), 404
             pct_1h = None
             pct_24h = None
             try:
@@ -80,7 +73,9 @@ def edge():
             result = analyzer.analyze(primary_horizon=primary_horizon)
             primary_data = daily_data if market_type == "daily" else hourly_data
             return jsonify({
-                "slug": primary_data.get("slug"),
+                # Echo requested slug so extension can run on active matching markets,
+                # even when mock payload carries a different representative slug.
+                "slug": slug,
                 "horizon": primary_horizon,
                 "edge_pct": result.primary.edge_pct,
                 "signal": result.primary.signal,
