@@ -3,6 +3,7 @@
 
   var API_BASE = "http://127.0.0.1:8765";
   var currentSlug = null;
+  var lastApiData = null;
 
   function slugFromPage() {
     var path = window.location.pathname || "";
@@ -42,26 +43,41 @@
     return Math.round(p * 100) + "¢";
   }
 
-  function formatTime(isoString) {
-    if (!isoString || typeof isoString !== "string") return "";
-    var d = new Date(isoString.trim());
-    if (isNaN(d.getTime())) return isoString;
-    var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    var mon = months[d.getUTCMonth()];
-    var day = d.getUTCDate();
-    var h = d.getUTCHours();
-    var m = d.getUTCMinutes();
+  function formatNow() {
+    var d = new Date();
+    var h = d.getHours(); var m = d.getMinutes(); var s = d.getSeconds();
     var ampm = h >= 12 ? "PM" : "AM";
-    h = h % 12;
-    if (h === 0) h = 12;
-    var min = m < 10 ? "0" + m : String(m);
-    return mon + " " + day + ", " + h + ":" + min + " " + ampm + " UTC";
+    h = h % 12; if (h === 0) h = 12;
+    var pad = function (n) { return n < 10 ? "0" + n : "" + n; };
+    return h + ":" + pad(m) + ":" + pad(s) + " " + ampm;
   }
 
   function escapeHtml(s) {
     var div = document.createElement("div");
     div.textContent = s;
     return div.innerHTML;
+  }
+
+  function readDomPrices() {
+    var scope = findTradeWidgetAnchor() || document.body;
+    var allNodes = Array.prototype.slice.call(scope.querySelectorAll("button, [role='button'], div, span"));
+    var upCents = null;
+    var downCents = null;
+    for (var i = 0; i < allNodes.length; i++) {
+      var node = allNodes[i];
+      var raw = (node.textContent || "").replace(/[\s\u00a0]+/g, " ").trim();
+      if (raw.length > 20) continue;
+      if (!upCents && /^up\b/i.test(raw) && /\d/.test(raw) && /¢/.test(raw)) {
+        var m1 = raw.match(/([\d.]+)\s*¢/);
+        if (m1) upCents = m1[1] + "¢";
+      }
+      if (!downCents && /^down\b/i.test(raw) && /\d/.test(raw) && /¢/.test(raw)) {
+        var m2 = raw.match(/([\d.]+)\s*¢/);
+        if (m2) downCents = m2[1] + "¢";
+      }
+      if (upCents && downCents) break;
+    }
+    return { up: upCents, down: downCents };
   }
 
   function showPanel(data) {
@@ -82,22 +98,30 @@
     var byClose24h = hasDual ? formatLabel(data.signal_24h, data.edge_24h_pct) : formatLabel(data.signal, data.edge_pct);
 
     var synthProb = data.synth_probability_up != null ? data.synth_probability_up : data.synth_probability;
-    var marketProb = data.polymarket_probability_up != null ? data.polymarket_probability_up : data.polymarket_probability;
-    var synthCents = formatProbAsCents(synthProb);
-    var marketCents = formatProbAsCents(marketProb);
+    var synthUpCents = formatProbAsCents(synthProb);
+    var synthDownCents = synthProb != null ? formatProbAsCents(1 - synthProb) : "—";
+
+    var domPrices = readDomPrices();
+    var liveUp = domPrices.up || "—";
+    var liveDown = domPrices.down || "—";
 
     panel.innerHTML =
       '<div class="synth-overlay-panel-header">' +
-        '<span class="synth-overlay-panel-title">Synth Analysis</span>' +
+        '<span class="synth-overlay-panel-title">Synth Overlay</span>' +
         '<span class="synth-overlay-panel-close">\u2715</span>' +
       "</div>" +
       '<div class="synth-overlay-panel-body">' +
         '<div class="synth-overlay-panel-section">' +
-          '<div class="synth-overlay-panel-label">Data & Analysis</div>' +
-          '<div class="synth-overlay-panel-row"><strong>Market YES price:</strong> ' + escapeHtml(marketCents) + "</div>" +
-          '<div class="synth-overlay-panel-row"><strong>Synth fair value:</strong> ' + escapeHtml(synthCents) + "</div>" +
+          '<div class="synth-overlay-panel-label">Synth Forecast</div>' +
+          '<div class="synth-overlay-panel-row"><strong>Synth Up:</strong> ' + escapeHtml(synthUpCents) + "</div>" +
+          '<div class="synth-overlay-panel-row"><strong>Synth Down:</strong> ' + escapeHtml(synthDownCents) + "</div>" +
           '<div class="synth-overlay-panel-row"><strong>Edge:</strong> ' + (data.edge_pct >= 0 ? "+" : "") + escapeHtml(String(data.edge_pct)) + "%</div>" +
           '<div class="synth-overlay-panel-text" style="margin-top:6px">' + escapeHtml(explanation) + "</div>" +
+        "</div>" +
+        '<div class="synth-overlay-panel-section">' +
+          '<div class="synth-overlay-panel-label">Live Market (from page)</div>' +
+          '<div class="synth-overlay-panel-row"><strong>Up:</strong> ' + escapeHtml(liveUp) + "</div>" +
+          '<div class="synth-overlay-panel-row"><strong>Down:</strong> ' + escapeHtml(liveDown) + "</div>" +
         "</div>" +
         '<div class="synth-overlay-panel-section">' +
           '<div class="synth-overlay-panel-label">Signal</div>' +
@@ -124,8 +148,10 @@
               "No trade \u2014 uncertainty is high or signals conflict." +
             "</div>"
           : "") +
-        '<div class="synth-overlay-panel-meta">Last update: ' +
-          escapeHtml(formatTime(data.current_time) || "unknown") + "</div>" +
+        '<div class="synth-overlay-panel-meta">' +
+          "Last update: " + escapeHtml(formatNow()) +
+          ' <span class="synth-overlay-refresh-btn" data-synth-refresh="1">\u21BB Refresh</span>' +
+        "</div>" +
       "</div>";
 
     var closeBtn = panel.querySelector(".synth-overlay-panel-close");
@@ -137,6 +163,27 @@
         if (t) t.classList.remove("synth-overlay-tab-hidden");
       });
     }
+
+    var refreshBtn = panel.querySelector("[data-synth-refresh]");
+    if (refreshBtn) {
+      refreshBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        refreshBtn.textContent = "\u21BB Refreshing\u2026";
+        var slug = slugFromPage();
+        if (!slug) return;
+        fetchEdge(slug).then(function (freshData) {
+          if (!freshData || freshData.error) {
+            refreshBtn.textContent = "\u21BB Refresh (failed)";
+            return;
+          }
+          lastApiData = freshData;
+          removeInlineOverlays();
+          injectInlineOverlays(freshData);
+          showPanel(freshData);
+        });
+      });
+    }
+
     document.body.appendChild(panel);
     requestAnimationFrame(function () {
       panel.classList.add("synth-overlay-panel-open");
@@ -166,62 +213,78 @@
 
   function injectInlineOverlays(data) {
     removeInlineOverlays();
-    var signal = data.signal;
-    var edgePct = data.edge_pct;
     var synthProb = data.synth_probability_up != null ? data.synth_probability_up : data.synth_probability;
-    var marketProb = data.polymarket_probability_up != null ? data.polymarket_probability_up : data.polymarket_probability;
-    var synthCents = formatProbAsCents(synthProb);
-    var marketCents = formatProbAsCents(marketProb);
-    var edgeSigned = (edgePct >= 0 ? "+" : "") + edgePct + "%";
-    var yesEdgeAbs = "+" + Math.abs(edgePct) + "%";
+    var synthUpCents = formatProbAsCents(synthProb);
+    var synthDownCents = synthProb != null ? formatProbAsCents(1 - synthProb) : "—";
+    var signal = data.signal;
 
-    var actionUp = signal === "underpriced" ? "Buy YES" : signal === "overpriced" ? "Avoid YES" : "Fair";
-    var actionDown = signal === "overpriced" ? "Buy NO" : signal === "underpriced" ? "Avoid NO" : "Fair";
-    var colorUp = signal === "underpriced" ? "#15803d" : signal === "overpriced" ? "#b91c1c" : "#6b7280";
-    var colorDown = signal === "overpriced" ? "#15803d" : signal === "underpriced" ? "#b91c1c" : "#6b7280";
+    var upColor = signal === "underpriced" ? "#15803d" : signal === "overpriced" ? "#b91c1c" : "#6b7280";
+    var downColor = signal === "overpriced" ? "#15803d" : signal === "underpriced" ? "#b91c1c" : "#6b7280";
 
-    var bar = document.createElement("div");
-    bar.setAttribute("data-synth-inline", "1");
-    bar.style.cssText =
-      "display:flex !important;gap:8px !important;align-items:center !important;" +
-      "padding:6px 12px !important;" +
-      "background:#f0f9ff !important;border:1px solid #93c5fd !important;" +
-      "border-radius:8px !important;font-family:system-ui,-apple-system,sans-serif !important;" +
-      "font-size:12px !important;z-index:99998 !important;" +
-      "box-shadow:0 2px 8px rgba(0,0,0,0.10) !important;" +
-      "visibility:visible !important;opacity:1 !important;";
+    var scope = findTradeWidgetAnchor() || document.body;
+    var allNodes = Array.prototype.slice.call(scope.querySelectorAll("button, [role='button'], div, span"));
+    var upTarget = null;
+    var downTarget = null;
+    for (var i = 0; i < allNodes.length; i++) {
+      var node = allNodes[i];
+      var raw = (node.textContent || "").replace(/[\s\u00a0]+/g, " ").trim();
+      if (raw.length > 20) continue;
+      if (!upTarget && /^up\b/i.test(raw) && /\d/.test(raw) && /¢/.test(raw)) upTarget = node;
+      if (!downTarget && /^down\b/i.test(raw) && /\d/.test(raw) && /¢/.test(raw)) downTarget = node;
+      if (upTarget && downTarget) break;
+    }
 
-    var upSpan = document.createElement("span");
-    upSpan.style.cssText = "font-weight:700 !important;color:" + colorUp + " !important;";
-    upSpan.textContent = "\u2191 " + actionUp + " " + edgeSigned;
+    function addSynthLabel(anchor, labelText, color) {
+      if (!anchor) return;
+      var parent = anchor.parentNode;
+      if (!parent) return;
+      var label = document.createElement("div");
+      label.setAttribute("data-synth-inline", "1");
+      label.style.cssText =
+        "display:block !important;visibility:visible !important;opacity:1 !important;" +
+        "font-size:11px !important;font-weight:700 !important;font-family:system-ui,-apple-system,sans-serif !important;" +
+        "color:" + color + " !important;text-align:center !important;" +
+        "margin-top:4px !important;padding:2px 6px !important;" +
+        "background:#f0f9ff !important;border:1px solid #93c5fd !important;border-radius:6px !important;" +
+        "z-index:99998 !important;";
+      label.textContent = labelText;
+      if (anchor.nextSibling) {
+        parent.insertBefore(label, anchor.nextSibling);
+      } else {
+        parent.appendChild(label);
+      }
+    }
 
-    var sep = document.createElement("span");
-    sep.style.cssText = "color:#9ca3af !important;";
-    sep.textContent = "|";
+    addSynthLabel(upTarget, "Synth: " + synthUpCents, upColor);
+    addSynthLabel(downTarget, "Synth: " + synthDownCents, downColor);
 
-    var downSpan = document.createElement("span");
-    downSpan.style.cssText = "font-weight:700 !important;color:" + colorDown + " !important;";
-    downSpan.textContent = "\u2193 " + actionDown + " " + (actionDown === "Buy NO" ? yesEdgeAbs : edgeSigned);
-
-    var dataSpan = document.createElement("span");
-    dataSpan.style.cssText = "color:#6b7280 !important;font-size:10px !important;margin-left:4px !important;";
-    dataSpan.textContent = "FV " + synthCents + " / MKT " + marketCents;
-
-    bar.appendChild(upSpan);
-    bar.appendChild(sep);
-    bar.appendChild(downSpan);
-    bar.appendChild(dataSpan);
-
-    var anchor = findTradeWidgetAnchor();
-    if (anchor && anchor.parentNode) {
-      bar.style.margin = "0 0 6px 0";
-      anchor.parentNode.insertBefore(bar, anchor);
-    } else {
-      // Fallback for unexpected layouts
-      bar.style.position = "fixed";
-      bar.style.top = "60px";
-      bar.style.right = "60px";
-      document.body.appendChild(bar);
+    if (!upTarget && !downTarget) {
+      var anchor = findTradeWidgetAnchor();
+      var bar = document.createElement("div");
+      bar.setAttribute("data-synth-inline", "1");
+      bar.style.cssText =
+        "display:flex !important;gap:12px !important;align-items:center !important;justify-content:center !important;" +
+        "padding:6px 12px !important;margin:4px 0 !important;" +
+        "background:#f0f9ff !important;border:1px solid #93c5fd !important;" +
+        "border-radius:8px !important;font-family:system-ui,-apple-system,sans-serif !important;" +
+        "font-size:12px !important;z-index:99998 !important;" +
+        "visibility:visible !important;opacity:1 !important;";
+      var upSpan = document.createElement("span");
+      upSpan.style.cssText = "font-weight:700 !important;color:" + upColor + " !important;";
+      upSpan.textContent = "\u2191 Synth Up: " + synthUpCents;
+      var downSpan = document.createElement("span");
+      downSpan.style.cssText = "font-weight:700 !important;color:" + downColor + " !important;";
+      downSpan.textContent = "\u2193 Synth Down: " + synthDownCents;
+      bar.appendChild(upSpan);
+      bar.appendChild(downSpan);
+      if (anchor && anchor.parentNode) {
+        anchor.parentNode.insertBefore(bar, anchor);
+      } else {
+        bar.style.position = "fixed";
+        bar.style.top = "60px";
+        bar.style.right = "60px";
+        document.body.appendChild(bar);
+      }
     }
   }
 
@@ -251,6 +314,7 @@
 
   function injectBadge(container, data) {
     removeBadge();
+    lastApiData = data;
     createSidePanelTab(data);
     injectInlineOverlays(data);
     var retries = [1000, 2500, 5000];

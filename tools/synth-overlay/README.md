@@ -4,10 +4,11 @@ Chrome extension that adds a live "fair value" layer on Polymarket market pages 
 
 ## What it does
 
-- **Side panel**: A "Synth" tab on the right edge opens a slide-out panel (not a floating card). Click to view full analysis.
-- **Data & analysis visibility**: Panel shows Market YES price, Synth fair value, Edge %, and a clear explanation of the data behind the decision.
+- **Side panel**: A "Synth" tab on the right edge opens a slide-out panel with full analysis, refresh button, and last-update timestamp.
+- **Synth prices on buttons**: Synth forecast prices (`Synth: xx¢`) appear directly below the Up/Down outcome buttons so users see the fair value at a glance.
+- **Live market prices from DOM**: Market prices shown in the panel are read directly from Polymarket's page elements (not cached API data), so they always match what the user sees.
 - **Confidence bar**: Discrete colors — red (&lt;40%), amber (40–70%), green (≥70%). 45% confidence is never green.
-- **Inline overlays**: Synth hints ("Synth: buy", "Synth: avoid", "Synth: sell") appear directly on Up/Down outcome buttons so users see actionable signals at a glance.
+- **Manual refresh**: Panel footer has a refresh button to re-fetch Synth data and re-read DOM prices on demand.
 - **Contextual only**: Overlay appears only when the page slug maps to a Synth-supported market (daily up/down, hourly up/down, or range). Unsupported markets show nothing.
 
 ## How it works
@@ -46,8 +47,8 @@ Chrome extension that adds a live "fair value" layer on Polymarket market pages 
 
 3. **Interaction:**
    - **Synth tab** = vertical tab on the right edge. Click it to open the **side panel**.
-   - **Side panel** shows: Data & Analysis (market price, Synth fair value, edge %, explanation), Signal (1h/24h), Confidence (color-coded bar), and invalidation.
-   - **Inline overlays** on Up/Down buttons: "Synth: buy", "Synth: avoid", or "Synth: sell" so users see the signal where they act.
+   - **Side panel** shows: Synth forecast (Up/Down prices, edge), live market prices (read from DOM), Signal (1h/24h), Confidence (color-coded bar), invalidation, and a refresh button.
+   - **Synth prices** appear directly below Up/Down buttons (`Synth: xx¢`) so users see the forecast where they act.
 
 4. **If nothing appears:** Ensure (a) server is running, (b) you loaded the extension from `tools/synth-overlay/extension` (not the parent folder), (c) the address bar is exactly one of the supported URLs above. Open DevTools → Network: you should see a request to `127.0.0.1:8765/api/edge?slug=...` with status 200.
 
