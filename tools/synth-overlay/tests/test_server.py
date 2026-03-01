@@ -107,3 +107,19 @@ def test_edge_range_respects_bracket_title(client):
 def test_edge_range_unknown_slug_404(client):
     resp = client.get("/api/edge?slug=bitcoin-price-on-february-26-nonexistent")
     assert resp.status_code == 404
+
+
+def test_edge_non_btc_daily_rejected(client):
+    resp = client.get("/api/edge?slug=ethereum-up-or-down-on-february-28")
+    assert resp.status_code == 404
+    data = resp.get_json()
+    assert "Only BTC" in data["error"]
+    assert data["asset"] == "ETH"
+
+
+def test_edge_non_btc_hourly_rejected(client):
+    resp = client.get("/api/edge?slug=solana-up-or-down-february-28-3pm-et")
+    assert resp.status_code == 404
+    data = resp.get_json()
+    assert "Only BTC" in data["error"]
+    assert data["asset"] == "SOL"

@@ -17,7 +17,7 @@ from synth_client import SynthClient
 
 from analyzer import EdgeAnalyzer
 from edge import edge_from_range_bracket
-from matcher import get_market_type, normalize_slug
+from matcher import asset_from_slug, get_market_type, normalize_slug
 
 app = Flask(__name__)
 _client: SynthClient | None = None
@@ -56,16 +56,24 @@ def edge():
     market_type = get_market_type(slug)
     if not market_type:
         return jsonify({"error": "Unsupported market", "slug": slug}), 404
+    asset = asset_from_slug(slug) or "BTC"
     try:
         client = get_client()
         if market_type in ("daily", "hourly"):
+            if asset != "BTC":
+                return jsonify({
+                    "error": f"Only BTC up-or-down markets are currently supported. "
+                             f"This market appears to be {asset}.",
+                    "slug": slug,
+                    "asset": asset,
+                }), 404
             daily_data = client.get_polymarket_daily()
             hourly_data = client.get_polymarket_hourly()
             pct_1h = None
             pct_24h = None
             try:
-                pct_1h = client.get_prediction_percentiles("BTC", horizon="1h")
-                pct_24h = client.get_prediction_percentiles("BTC", horizon="24h")
+                pct_1h = client.get_prediction_percentiles(asset, horizon="1h")
+                pct_24h = client.get_prediction_percentiles(asset, horizon="24h")
             except Exception:
                 pass
             primary_horizon = "24h" if market_type == "daily" else "1h"
@@ -112,7 +120,7 @@ def edge():
             )
         pct_24h = None
         try:
-            pct_24h = client.get_prediction_percentiles("BTC", horizon="24h")
+            pct_24h = client.get_prediction_percentiles(asset, horizon="24h")
         except Exception:
             pass
         analyzer = EdgeAnalyzer()

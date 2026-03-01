@@ -9,6 +9,24 @@ MARKET_RANGE = "range"
 
 _HOURLY_TIME_PATTERN = re.compile(r"\d{1,2}(am|pm)")
 
+_ASSET_PREFIXES = {
+    "bitcoin": "BTC",
+    "ethereum": "ETH",
+    "solana": "SOL",
+    "xrp": "XRP",
+}
+
+
+def asset_from_slug(slug: str) -> str | None:
+    """Extract the asset ticker (BTC, ETH, …) from a Polymarket slug prefix."""
+    if not slug:
+        return None
+    slug_lower = slug.lower()
+    for prefix, ticker in _ASSET_PREFIXES.items():
+        if slug_lower.startswith(prefix + "-"):
+            return ticker
+    return None
+
 
 def normalize_slug(url_or_slug: str) -> str | None:
     """Extract market slug from Polymarket URL or return slug as-is if already a slug."""

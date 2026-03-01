@@ -5,7 +5,7 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from matcher import normalize_slug, get_market_type, is_supported
+from matcher import asset_from_slug, normalize_slug, get_market_type, is_supported
 
 
 def test_normalize_slug_from_url():
@@ -45,3 +45,17 @@ def test_is_supported():
     assert is_supported("bitcoin-up-or-down-on-february-26") is True
     assert is_supported("bitcoin-price-on-february-26") is True
     assert is_supported("unknown-market") is False
+
+
+def test_asset_from_slug():
+    assert asset_from_slug("bitcoin-up-or-down-on-february-26") == "BTC"
+    assert asset_from_slug("ethereum-up-or-down-on-february-28") == "ETH"
+    assert asset_from_slug("solana-up-or-down-on-march-1") == "SOL"
+    assert asset_from_slug("xrp-up-or-down-on-march-1") == "XRP"
+
+
+def test_asset_from_slug_unknown():
+    assert asset_from_slug("btc-up-or-down-on-march-1") is None
+    assert asset_from_slug("random-slug") is None
+    assert asset_from_slug("") is None
+    assert asset_from_slug(None) is None
