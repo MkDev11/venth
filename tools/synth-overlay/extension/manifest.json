@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Synth Panel",
+  "version": "1.2.0",
+  "description": "Chrome Side Panel for Synth forecast data on market sites",
+  "permissions": ["activeTab", "tabs", "sidePanel"],
+  "host_permissions": [
+    "https://polymarket.com/*",
+    "http://127.0.0.1:8765/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Open Synth Panel"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://polymarket.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

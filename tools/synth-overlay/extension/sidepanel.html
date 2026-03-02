@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Synth Panel</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <header class="header">
+      <h1>Synth</h1>
+      <button id="refreshBtn" title="Refresh now">↻ Refresh</button>
+    </header>
+
+    <section class="card" id="statusCard">
+      <div id="statusText" class="status-text">Waiting for active market tab…</div>
+    </section>
+
+    <section class="card">
+      <div class="label">Synth Forecast</div>
+      <div class="row"><span>Up</span><strong id="synthUp">—</strong></div>
+      <div class="row"><span>Down</span><strong id="synthDown">—</strong></div>
+      <div class="row edge-row"><span>Edge</span><strong id="edgeValue">—</strong></div>
+    </section>
+
+    <section class="card">
+      <div class="label">Signal</div>
+      <div class="row"><span>1 h</span><strong id="signal1h">—</strong></div>
+      <div class="row"><span>24 h</span><strong id="signal24h">—</strong></div>
+      <div class="row"><span>Strength</span><strong id="strength">—</strong></div>
+    </section>
+
+    <section class="card">
+      <div class="label">Confidence</div>
+      <div class="bar"><div id="confFill" class="fill"></div></div>
+      <div id="confText" class="muted">—</div>
+    </section>
+
+    <section class="card">
+      <div class="label">Analysis</div>
+      <p id="analysisText" class="text">—</p>
+      <div id="noTrade" class="warning hidden">⚠ No trade — uncertainty is high or signals conflict.</div>
+    </section>
+
+    <section class="card" id="invalidationCard">
+      <div class="label">Invalidation</div>
+      <p id="invalidationText" class="text muted">—</p>
+    </section>
+
+    <footer class="footer">
+      <span>Data as of:</span>
+      <strong id="lastUpdate">—</strong>
+    </footer>
+
+    <script src="sidepanel.js"></script>
+  </body>
+</html>
