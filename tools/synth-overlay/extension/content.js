@@ -233,5 +233,8 @@
     if (message.type === "synth:getContext") {
       sendResponse({ ok: true, context: getContext() });
     }
+    if (message.type === "synth:getPrices") {
+      sendResponse({ ok: true, prices: scrapeLivePrices() });
+    }
   });
 })();

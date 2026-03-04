@@ -310,13 +310,31 @@ function stopPollProgress() {
   els.pollProgress.style.width = "0%";
 }
 
-// Listen for real-time price updates from content script
+// Listen for real-time price updates from content script (push-based)
 chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
   if (message && message.type === "synth:priceUpdate") {
-    console.log("[Synth-Overlay] Received live price update:", message.prices);
+    console.log("[Synth-Overlay] Received live price update (push):", message.prices);
     updateWithLivePrice(message.prices);
   }
 });
+
+// Fast price poll: pull live prices from content script every 1s (reliable fallback)
+var lastPollPrices = { upPrice: null, downPrice: null };
+setInterval(async function() {
+  if (!cachedSynthData) return;
+  var tab = await activeSupportedTab();
+  if (!tab) return;
+  try {
+    var resp = await chrome.tabs.sendMessage(tab.id, { type: "synth:getPrices" });
+    if (resp && resp.ok && resp.prices) {
+      if (resp.prices.upPrice !== lastPollPrices.upPrice || resp.prices.downPrice !== lastPollPrices.downPrice) {
+        lastPollPrices = { upPrice: resp.prices.upPrice, downPrice: resp.prices.downPrice };
+        console.log("[Synth-Overlay] Live price poll update:", resp.prices);
+        updateWithLivePrice(resp.prices);
+      }
+    }
+  } catch (_e) {}
+}, 1000);
 
 // Start polling
 refresh();
