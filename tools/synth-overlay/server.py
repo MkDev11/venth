@@ -65,9 +65,21 @@ def _fetch_updown_pair(client: SynthClient, asset: str, market_type: str) -> tup
     return primary, reference
 
 
-def _handle_updown_market(client: SynthClient, slug: str, asset: str, market_type: str):
-    """Handle up/down markets for any supported asset and horizon."""
+def _handle_updown_market(
+    client: SynthClient, slug: str, asset: str, market_type: str, live_prob_up: float | None = None
+):
+    """Handle up/down markets for any supported asset and horizon.
+    
+    Args:
+        live_prob_up: Real-time Polymarket price scraped from DOM. If provided,
+                      overrides the API's polymarket_probability_up for edge calculation.
+    """
     primary_data, reference_data = _fetch_updown_pair(client, asset, market_type)
+
+    # Override Polymarket probability with live DOM price if available
+    if live_prob_up is not None:
+        primary_data = dict(primary_data)  # Copy to avoid mutating cached data
+        primary_data["polymarket_probability_up"] = live_prob_up
 
     pct_1h = None
     pct_24h = None
@@ -83,6 +95,14 @@ def _handle_updown_market(client: SynthClient, slug: str, asset: str, market_typ
     if market_type in ("daily", "hourly") and reference_data:
         daily = primary_data if market_type == "daily" else reference_data
         hourly = reference_data if market_type == "daily" else primary_data
+        # Apply live price override to the appropriate horizon data
+        if live_prob_up is not None:
+            if market_type == "daily":
+                daily = dict(daily)
+                daily["polymarket_probability_up"] = live_prob_up
+            else:
+                hourly = dict(hourly)
+                hourly["polymarket_probability_up"] = live_prob_up
         analyzer = EdgeAnalyzer(daily, hourly, pct_1h, pct_24h)
         result = analyzer.analyze(primary_horizon=primary_horizon)
         primary_src = daily if market_type == "daily" else hourly
@@ -105,6 +125,7 @@ def _handle_updown_market(client: SynthClient, slug: str, asset: str, market_typ
             "synth_probability_up": primary_src.get("synth_probability_up"),
             "polymarket_probability_up": primary_src.get("polymarket_probability_up"),
             "current_time": primary_src.get("current_time"),
+            "live_price_used": live_prob_up is not None,
         })
 
     # 5min/15min: single-horizon analysis with optional reference context
@@ -126,6 +147,7 @@ def _handle_updown_market(client: SynthClient, slug: str, asset: str, market_typ
         "synth_probability_up": primary_data.get("synth_probability_up"),
         "polymarket_probability_up": primary_data.get("polymarket_probability_up"),
         "current_time": primary_data.get("current_time"),
+        "live_price_used": live_prob_up is not None,
     }
     # Include reference horizon context when available
     if reference_data and result.secondary:
@@ -149,10 +171,17 @@ def edge():
     if not market_type:
         return jsonify({"error": "Unsupported market", "slug": slug}), 404
     asset = asset_from_slug(slug) or "BTC"
+    # Live Polymarket price scraped from DOM (real-time, avoids API latency)
+    live_prob_up = request.args.get("live_prob_up")
+    if live_prob_up:
+        try:
+            live_prob_up = float(live_prob_up)
+        except (ValueError, TypeError):
+            live_prob_up = None
     try:
         client = get_client()
         if market_type in ("daily", "hourly", "15min", "5min"):
-            return _handle_updown_market(client, slug, asset, market_type)
+            return _handle_updown_market(client, slug, asset, market_type, live_prob_up)
         # range
         data = client.get_polymarket_range()
         if not isinstance(data, list):

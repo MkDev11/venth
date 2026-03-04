@@ -63,8 +63,13 @@ async function getContextFromPage(tabId) {
   }
 }
 
-async function fetchEdge(slug) {
-  const res = await fetch(API_BASE + "/api/edge?slug=" + encodeURIComponent(slug));
+async function fetchEdge(slug, livePrices) {
+  var url = API_BASE + "/api/edge?slug=" + encodeURIComponent(slug);
+  // Pass live prices to server if available for real-time edge calculation
+  if (livePrices && livePrices.upPrice != null) {
+    url += "&live_prob_up=" + encodeURIComponent(livePrices.upPrice);
+  }
+  const res = await fetch(url);
   if (!res.ok) return null;
   return await res.json();
 }
@@ -122,7 +127,7 @@ async function refresh() {
     return;
   }
 
-  const edge = await fetchEdge(ctx.slug);
+  const edge = await fetchEdge(ctx.slug, ctx.livePrices);
   if (!edge || edge.error) {
     render(Object.assign({}, EMPTY, {
       status: "Market not supported by Synth for this slug.",
@@ -179,4 +184,9 @@ async function refresh() {
 
 els.refreshBtn.addEventListener("click", refresh);
 refresh();
-setInterval(refresh, 15000);
+
+// Polling frequency: Synth API updates forecasts every ~60 seconds for short-term markets.
+// We poll every 30 seconds to balance freshness vs API load.
+// Live DOM prices are scraped on each refresh for real-time edge calculation.
+const SYNTH_POLL_INTERVAL_MS = 30000;
+setInterval(refresh, SYNTH_POLL_INTERVAL_MS);

@@ -175,3 +175,27 @@ def test_edge_5min_sol(client):
     data = resp.get_json()
     assert data["asset"] == "SOL"
     assert data["market_type"] == "5min"
+
+
+def test_edge_live_price_override(client):
+    """Test that live_prob_up parameter overrides API price for edge calculation."""
+    # First request without live price
+    resp1 = client.get("/api/edge?slug=btc-updown-5m-1772205000")
+    assert resp1.status_code == 200
+    data1 = resp1.get_json()
+    assert data1.get("live_price_used") is False
+
+    # Second request with live price override
+    resp2 = client.get("/api/edge?slug=btc-updown-5m-1772205000&live_prob_up=0.75")
+    assert resp2.status_code == 200
+    data2 = resp2.get_json()
+    assert data2.get("live_price_used") is True
+    assert data2["polymarket_probability_up"] == 0.75
+
+
+def test_edge_live_price_invalid_ignored(client):
+    """Test that invalid live_prob_up values are gracefully ignored."""
+    resp = client.get("/api/edge?slug=btc-updown-5m-1772205000&live_prob_up=invalid")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data.get("live_price_used") is False
