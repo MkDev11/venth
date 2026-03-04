@@ -159,7 +159,12 @@
       console.log("[Synth-Overlay] __NEXT_DATA__ parse failed:", e.message);
     }
 
-    console.log("[Synth-Overlay] Could not scrape live prices from DOM");
+    // Throttle this log to avoid console spam on resolved/expired markets
+    var now = Date.now();
+    if (!scrapeLivePrices._lastWarn || now - scrapeLivePrices._lastWarn > 10000) {
+      scrapeLivePrices._lastWarn = now;
+      console.log("[Synth-Overlay] Could not scrape live prices from DOM");
+    }
     return null;
   }
 
