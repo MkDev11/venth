@@ -6,6 +6,10 @@ const els = {
   statusText: document.getElementById("statusText"),
   synthUp: document.getElementById("synthUp"),
   synthDown: document.getElementById("synthDown"),
+  polyUp: document.getElementById("polyUp"),
+  polyDown: document.getElementById("polyDown"),
+  deltaUp: document.getElementById("deltaUp"),
+  deltaDown: document.getElementById("deltaDown"),
   edgeValue: document.getElementById("edgeValue"),
   horizonLabel: document.getElementById("horizonLabel"),
   signalPrimary: document.getElementById("signalPrimary"),
@@ -47,6 +51,16 @@ function confidenceColor(score) {
   return "#ef4444";
 }
 
+function fmtDelta(synth, poly) {
+  if (synth == null || poly == null) return { text: "—", cls: "" };
+  var diff = Math.round((synth - poly) * 100);
+  var sign = diff >= 0 ? "+" : "";
+  return { 
+    text: sign + diff + "%", 
+    cls: diff > 0 ? "positive" : diff < 0 ? "negative" : "" 
+  };
+}
+
 async function activeSupportedTab() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   const tab = tabs && tabs[0];
@@ -78,6 +92,12 @@ function render(state) {
   els.statusText.textContent = state.status;
   els.synthUp.textContent = state.synthUp;
   els.synthDown.textContent = state.synthDown;
+  els.polyUp.textContent = state.polyUp || "—";
+  els.polyDown.textContent = state.polyDown || "—";
+  els.deltaUp.textContent = state.deltaUp ? state.deltaUp.text : "—";
+  els.deltaUp.className = "delta " + (state.deltaUp ? state.deltaUp.cls : "");
+  els.deltaDown.textContent = state.deltaDown ? state.deltaDown.text : "—";
+  els.deltaDown.className = "delta " + (state.deltaDown ? state.deltaDown.cls : "");
   els.edgeValue.textContent = state.edge;
   els.horizonLabel.textContent = state.horizonLabel || "Primary";
   els.signalPrimary.textContent = state.signalPrimary;
@@ -97,7 +117,8 @@ function render(state) {
 }
 
 const EMPTY = {
-  synthUp: "—", synthDown: "—", edge: "—",
+  synthUp: "—", synthDown: "—", polyUp: "—", polyDown: "—",
+  deltaUp: null, deltaDown: null, edge: "—",
   horizonLabel: "Primary", signalPrimary: "—",
   refLabel: "Reference", signalRef: "—",
   strength: "—", asset: "—", marketType: "—",
@@ -167,11 +188,23 @@ async function refresh() {
     livePricesFromDOM: ctx.livePrices 
   });
 
+  // Get Polymarket price (from API response)
+  var polyProbUp = edge.polymarket_probability_up;
+  var polyProbDown = polyProbUp != null ? 1 - polyProbUp : null;
+
+  // Calculate deltas (Synth - Poly)
+  var deltaUp = fmtDelta(synthProbUp, polyProbUp);
+  var deltaDown = fmtDelta(synthProbUp != null ? 1 - synthProbUp : null, polyProbDown);
+
   var liveStatus = edge.live_price_used ? " (Live)" : "";
   render({
     status: "Synced — " + (edge.asset || "BTC") + " " + horizon + " forecast." + liveStatus,
     synthUp: fmtCentsFromProb(synthProbUp),
     synthDown: synthProbUp == null ? "—" : fmtCentsFromProb(1 - synthProbUp),
+    polyUp: fmtCentsFromProb(polyProbUp),
+    polyDown: fmtCentsFromProb(polyProbDown),
+    deltaUp: deltaUp,
+    deltaDown: deltaDown,
     edge: fmtEdge(edge.edge_pct),
     horizonLabel: horizonLabel,
     signalPrimary: signalPrimary,

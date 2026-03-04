@@ -17,9 +17,22 @@
     </section>
 
     <section class="card">
-      <div class="label">Synth Forecast</div>
-      <div class="row"><span>Up</span><strong id="synthUp">—</strong></div>
-      <div class="row"><span>Down</span><strong id="synthDown">—</strong></div>
+      <div class="label">Price Comparison</div>
+      <div class="price-header">
+        <span></span><span class="col-label">Synth</span><span class="col-label">Poly</span><span class="col-label">Δ</span>
+      </div>
+      <div class="price-row">
+        <span>Up</span>
+        <strong id="synthUp">—</strong>
+        <strong id="polyUp">—</strong>
+        <strong id="deltaUp" class="delta">—</strong>
+      </div>
+      <div class="price-row">
+        <span>Down</span>
+        <strong id="synthDown">—</strong>
+        <strong id="polyDown">—</strong>
+        <strong id="deltaDown" class="delta">—</strong>
+      </div>
       <div class="row edge-row"><span>Edge</span><strong id="edgeValue">—</strong></div>
     </section>
 
