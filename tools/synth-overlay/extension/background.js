@@ -97,13 +97,11 @@ function syncAlarmState() {
       chrome.alarms.get(ALARM_NAME, function (existing) {
         if (!existing) {
           chrome.alarms.create(ALARM_NAME, { periodInMinutes: POLL_INTERVAL_MINUTES });
-          console.log("[Synth-Alerts] Alarm started, polling every " + POLL_INTERVAL_MINUTES + " min");
           pollWatchlist();
         }
       });
     } else {
       chrome.alarms.clear(ALARM_NAME);
-      console.log("[Synth-Alerts] Alarm stopped (disabled or empty watchlist)");
     }
   });
 }
@@ -138,7 +136,6 @@ chrome.alarms.onAlarm.addListener(function (alarm) {
 function pollWatchlist() {
   loadAlertSettings(function (settings) {
     if (!settings.enabled || settings.watchlist.length === 0) return;
-    console.log("[Synth-Alerts] Polling " + settings.watchlist.length + " market(s)");
     settings.watchlist.forEach(function (item) {
       checkMarketEdge(item, settings.threshold);
     });
@@ -161,9 +158,7 @@ function checkMarketEdge(item, threshold) {
         suppressAndNotify(item, data, cooldowns);
       });
     })
-    .catch(function (err) {
-      console.log("[Synth-Alerts] Fetch failed for " + item.slug + ": " + err.message);
-    });
+    .catch(function () {});
 }
 
 // Skip notification if user is already viewing this market
@@ -244,13 +239,11 @@ function createEdgeNotification(notifId, item, data) {
       priority: 2,
       requireInteraction: !autoDismiss,
     });
-    console.log("[Synth-Alerts] Fired: " + title);
   });
 }
 
 // Focus or open the Polymarket page for the clicked notification
 chrome.notifications.onClicked.addListener(function (notifId) {
-  console.log("[Synth-Alerts] Notification clicked:", notifId);
   if (notifId.indexOf("synth-edge::") !== 0) return;
   var slug = notifId.replace("synth-edge::", "");
   if (!slug) { chrome.notifications.clear(notifId); return; }
