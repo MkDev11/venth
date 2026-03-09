@@ -188,16 +188,18 @@ function createEdgeNotification(notifId, item, data) {
 
   chrome.notifications.create(notifId, {
     type: "basic",
+    iconUrl: "icon128.png",
     title: title,
     message: lines.join("\n"),
     priority: 2,
-    requireInteraction: false,
+    requireInteraction: true,
   });
   console.log("[Synth-Alerts] Fired: " + title);
 }
 
 // Focus or open the Polymarket page for the clicked notification
 chrome.notifications.onClicked.addListener(function (notifId) {
+  console.log("[Synth-Alerts] Notification clicked:", notifId);
   if (notifId.indexOf("synth-edge::") !== 0) return;
   var slug = notifId.replace("synth-edge::", "");
   if (!slug) { chrome.notifications.clear(notifId); return; }

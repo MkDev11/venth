@@ -222,6 +222,7 @@ async function refresh() {
   cachedSynthData = edge;
   cachedMarketType = mtype;
   currentSlug = ctx.slug;
+  if (typeof updateWatchBtnState === "function") updateWatchBtnState();
 
   // Log live price status for debugging
   console.log("[Synth-Overlay] Edge response:", { 
