@@ -21,6 +21,8 @@ from pipeline import (
     should_no_trade,
     forecast_confidence,
     is_volatility_elevated,
+    estimate_implied_vol,
+    compare_volatility,
     _outcome_prices,
     _outcome_prices_and_cdf,
     _outcome_prices_with_probs,
@@ -112,7 +114,9 @@ def _confidence_bar(confidence: float, width: int = 25) -> str:
         label = "MED"
     else:
         label = "LOW"
-    return f"[{'\u2588' * filled}{'\u2591' * empty}] {confidence:.0%} {label}"
+    bar_filled = '\u2588' * filled
+    bar_empty = '\u2591' * empty
+    return f"[{bar_filled}{bar_empty}] {confidence:.0%} {label}"
 
 
 def _risk_meter(max_loss: float, current_price: float) -> str:
@@ -121,7 +125,9 @@ def _risk_meter(max_loss: float, current_price: float) -> str:
         return ""
     pct = max_loss / current_price * 100
     blocks = min(10, int(pct * 2))  # 0.5% per block
-    return f"[{'\u2588' * blocks}{'\u2591' * (10 - blocks)}] {pct:.2f}% of price"
+    bar_filled = '\u2588' * blocks
+    bar_empty = '\u2591' * (10 - blocks)
+    return f"[{bar_filled}{bar_empty}] {pct:.2f}% of price"
 
 
 def _pause(next_label: str, skip: bool = False):
@@ -147,13 +153,14 @@ def screen_view_setup(preset_symbol: str | None = None, preset_view: str | None 
         symbol = input(f"{BAR}  Enter symbol [BTC]: ").strip().upper() or "BTC"
         if symbol not in SUPPORTED_ASSETS:
             symbol = "BTC"
-    if preset_view and preset_view in ("bullish", "bearish", "neutral"):
+    valid_views = ("bullish", "bearish", "neutral", "vol")
+    if preset_view and preset_view in valid_views:
         view = preset_view
         print(f"{BAR}  View: {view} (from --view)")
     else:
-        print(f"{BAR}  Market view: bullish | bearish | neutral")
+        print(f"{BAR}  Market view: bullish | bearish | neutral | vol")
         view = input(f"{BAR}  Enter view [bullish]: ").strip().lower() or "bullish"
-        if view not in ("bullish", "bearish", "neutral"):
+        if view not in valid_views:
             view = "bullish"
     if preset_risk and preset_risk in ("low", "medium", "high"):
         risk = preset_risk
@@ -163,9 +170,9 @@ def screen_view_setup(preset_symbol: str | None = None, preset_view: str | None 
         risk = input(f"{BAR}  Enter risk [medium]: ").strip().lower() or "medium"
         if risk not in ("low", "medium", "high"):
             risk = "medium"
-    strat_hint = {"bullish": "directional long/spread", "bearish": "directional put/spread", "neutral": "range-bound/butterfly"}[view]
+    strat_hint = {"bullish": "directional long/spread", "bearish": "directional put/spread", "neutral": "range-bound/butterfly", "vol": "straddle/strangle/iron condor"}[view]
     risk_desc = {"low": "defined-risk, higher win-rate", "medium": "balanced risk/reward", "high": "higher convexity, wider stops"}[risk]
-    view_icon = {"bullish": "\u25b2", "bearish": "\u25bc", "neutral": "\u25c6"}[view]
+    view_icon = {"bullish": "\u25b2", "bearish": "\u25bc", "neutral": "\u25c6", "vol": "\u2248"}[view]
     print(f"{BAR}")
     print(f"{BAR}  {DSEP * 60}")
     print(f"{BAR}    {view_icon} {symbol}  {view.upper()}  {risk.upper()} RISK")
@@ -180,7 +187,8 @@ def screen_view_setup(preset_symbol: str | None = None, preset_view: str | None 
 def screen_market_context(symbol: str, current_price: float, confidence: float,
                           fusion_state: str, vol_future: float, vol_realized: float,
                           volatility_high: bool, p1h_last: dict | None, p24h_last: dict | None,
-                          no_trade_reason: str | None):
+                          no_trade_reason: str | None,
+                          implied_vol: float = 0.0, vol_bias: str | None = None):
     """Screen 1b: Market context — shows current conditions before recommendations."""
     print(_header(f"Market Context: {symbol}"))
     print(_kv("Price", f"${current_price:,.2f}"))
@@ -191,6 +199,11 @@ def screen_market_context(symbol: str, current_price: float, confidence: float,
     vol_label = "ELEVATED" if volatility_high else "Normal"
     vol_ratio_str = f"{vol_future / vol_realized:.2f}x" if vol_realized > 0 else "N/A"
     print(_kv("Volatility", f"fwd {vol_future:.1f}% / realized {vol_realized:.1f}% (ratio {vol_ratio_str}) [{vol_label}]"))
+    if implied_vol > 0:
+        iv_ratio = vol_future / implied_vol
+        bias_label = (vol_bias or "").replace("_", " ").upper()
+        print(_kv("Implied Vol", f"{implied_vol:.1f}% (from ATM options)"))
+        print(_kv("Synth vs IV", f"{iv_ratio:.2f}x \u2192 {bias_label}"))
     print(f"{BAR}")
     if p1h_last:
         p05 = float(p1h_last.get("0.05", 0))
@@ -358,7 +371,9 @@ def _distribution_ascii(percentiles_last: dict, current_price: float) -> list[st
         label = PERCENTILE_LABELS.get(k, k)
         marker = "  \u2190 median" if k == "0.5" else ""
         pct_from_cur = (price - current_price) / current_price * 100
-        lines.append(f"{BAR}    ${price:>10,.0f} ({pct_from_cur:+5.1f}%)  {'\u2593' * filled}{'\u2591' * empty}  {label:>3s}{marker}")
+        bar_filled = '\u2593' * filled
+        bar_empty = '\u2591' * empty
+        lines.append(f"{BAR}    ${price:>10,.0f} ({pct_from_cur:+5.1f}%)  {bar_filled}{bar_empty}  {label:>3s}{marker}")
     return lines
 
 
@@ -449,6 +464,24 @@ def screen_why_this_works(best: ScoredStrategy | None, fusion_state: str, curren
         be_dir = f"stay between ${s.strikes[0]:,.0f}-${s.strikes[1]:,.0f}"
     elif st == "long_call_butterfly":
         be_dir = f"pin near ${s.strikes[1]:,.0f} (center strike)"
+    elif st == "long_straddle":
+        be_up = s.strikes[0] + s.cost
+        be_dn = s.strikes[0] - s.cost
+        be_dir = f"move beyond ${be_dn:,.0f} or ${be_up:,.0f} (breakevens)"
+    elif st == "long_strangle":
+        be_dn = s.strikes[0] - s.cost
+        be_up = s.strikes[1] + s.cost
+        be_dir = f"move beyond ${be_dn:,.0f} or ${be_up:,.0f} (breakevens)"
+    elif st == "short_straddle":
+        credit = -s.cost
+        be_up = s.strikes[0] + credit
+        be_dn = s.strikes[0] - credit
+        be_dir = f"stay between ${be_dn:,.0f}-${be_up:,.0f} (profit zone)"
+    elif st == "short_strangle":
+        credit = -s.cost
+        be_dn = s.strikes[0] - credit
+        be_up = s.strikes[1] + credit
+        be_dir = f"stay between ${be_dn:,.0f}-${be_up:,.0f} (breakevens)"
     else:
         be_dir = "move in your favor"
     median_24h = float(p24h_last.get("0.5", 0)) if p24h_last else 0
@@ -551,7 +584,7 @@ def main():
         description="Options GPS: turn a market view into one clear options decision",
     )
     parser.add_argument("--symbol", default=None, help="Asset symbol (BTC, ETH, SOL, ...)")
-    parser.add_argument("--view", default=None, choices=["bullish", "bearish", "neutral"])
+    parser.add_argument("--view", default=None, choices=["bullish", "bearish", "neutral", "vol"])
     parser.add_argument("--risk", default=None, choices=["low", "medium", "high"])
     parser.add_argument("--screen", default="all",
                         help="Screens to show: comma-separated 1,2,3,4 or 'all' (default: all)")
@@ -589,17 +622,20 @@ def main():
     volatility_high = is_volatility_elevated(vol_future, vol_realized)
     vol_ratio = (vol_future / vol_realized) if vol_realized > 0 else 1.0
     confidence = forecast_confidence(p24h_last, current_price)
-    no_trade_reason = should_no_trade(fusion_state, view, volatility_high, confidence)
+    implied_vol = estimate_implied_vol(options) if view == "vol" else 0.0
+    vol_bias = compare_volatility(vol_future, implied_vol) if view == "vol" else None
+    no_trade_reason = should_no_trade(fusion_state, view, volatility_high, confidence, vol_bias=vol_bias)
     candidates = generate_strategies(options, view, risk, asset=symbol, expiry=expiry)
     outcome_prices, cdf_values = _outcome_prices_and_cdf(p24h_last)
-    scored = rank_strategies(candidates, fusion_state, view, outcome_prices, risk, current_price, confidence, vol_ratio, cdf_values=cdf_values) if candidates else []
+    scored = rank_strategies(candidates, fusion_state, view, outcome_prices, risk, current_price, confidence, vol_ratio, cdf_values=cdf_values, vol_bias=vol_bias) if candidates else []
     best, safer, upside = select_three_cards(scored)
     shown_any = 1 in screens
     if shown_any:
         _pause("Market Context", args.no_prompt)
         screen_market_context(symbol, current_price, confidence, fusion_state,
                               vol_future, vol_realized, volatility_high,
-                              p1h_last, p24h_last, no_trade_reason)
+                              p1h_last, p24h_last, no_trade_reason,
+                              implied_vol=implied_vol, vol_bias=vol_bias)
     if 2 in screens:
         if shown_any:
             _pause("Screen 2: Top Plays", args.no_prompt)
@@ -628,6 +664,8 @@ def main():
             "forecast": round(vol_future, 2),
             "realized": round(vol_realized, 2),
             "elevated": volatility_high,
+            "implied_vol": round(implied_vol, 2) if implied_vol else None,
+            "vol_bias": vol_bias,
         },
         "1h_data_available": p1h_available,
         "no_trade": no_trade_reason is not None,

@@ -7,9 +7,10 @@ Uses Synth get_prediction_percentiles, get_option_pricing, get_volatility.
 from dataclasses import dataclass, field
 from typing import Literal
 
-ViewBias = Literal["bullish", "bearish", "neutral"]
+ViewBias = Literal["bullish", "bearish", "neutral", "vol"]
 RiskLevel = Literal["low", "medium", "high"]
 FusionState = Literal["aligned_bullish", "aligned_bearish", "countermove", "unclear"]
+VolBias = Literal["long_vol", "short_vol", "neutral_vol"]
 
 
 @dataclass
@@ -250,6 +251,94 @@ def generate_strategies(
             candidates.append(_long_call(atm, "Long call (ATM)"))
         if atm in puts:
             candidates.append(_long_put(atm, "Long put (ATM)"))
+    if view == "vol":
+        # Long straddle: buy ATM call + ATM put
+        if atm in calls and atm in puts:
+            prem_c = float(calls[atm])
+            prem_p = float(puts[atm])
+            total = prem_c + prem_p
+            be_up = atm + total
+            be_dn = atm - total
+            candidates.append(StrategyCandidate(
+                "long_straddle", "neutral", "Long straddle (ATM)",
+                [atm], total, total,
+                legs=[StrategyLeg("BUY", 1, "Call", atm, prem_c),
+                      StrategyLeg("BUY", 1, "Put", atm, prem_p)],
+                expiry=expiry,
+                max_profit_condition=f"Unlimited if {asset} moves beyond ${be_dn:,.0f}-${be_up:,.0f}",
+            ))
+        # Long strangle: buy OTM call + OTM put
+        if otm_call in calls and otm_put in puts and otm_call != atm and otm_put != atm:
+            prem_c = float(calls[otm_call])
+            prem_p = float(puts[otm_put])
+            total = prem_c + prem_p
+            be_up = otm_call + total
+            be_dn = otm_put - total
+            candidates.append(StrategyCandidate(
+                "long_strangle", "neutral", "Long strangle (OTM)",
+                [otm_put, otm_call], total, total,
+                legs=[StrategyLeg("BUY", 1, "Put", otm_put, prem_p),
+                      StrategyLeg("BUY", 1, "Call", otm_call, prem_c)],
+                expiry=expiry,
+                max_profit_condition=f"Unlimited if {asset} moves beyond ${be_dn:,.0f}-${be_up:,.0f}",
+            ))
+        # Short straddle: sell ATM call + ATM put (high risk only)
+        if risk == "high" and atm in calls and atm in puts:
+            prem_c = float(calls[atm])
+            prem_p = float(puts[atm])
+            credit = prem_c + prem_p
+            be_up = atm + credit
+            be_dn = atm - credit
+            candidates.append(StrategyCandidate(
+                "short_straddle", "neutral", "Short straddle (ATM)",
+                [atm], -credit, credit * 3,
+                legs=[StrategyLeg("SELL", 1, "Call", atm, prem_c),
+                      StrategyLeg("SELL", 1, "Put", atm, prem_p)],
+                expiry=expiry, max_profit=credit,
+                max_profit_condition=f"${credit:,.0f} if {asset} pins at ${atm:,.0f}; profit zone ${be_dn:,.0f}-${be_up:,.0f}",
+            ))
+        # Short strangle: sell OTM call + OTM put (medium/high risk)
+        if risk in ("medium", "high") and otm_call in calls and otm_put in puts and otm_call != atm and otm_put != atm:
+            prem_c = float(calls[otm_call])
+            prem_p = float(puts[otm_put])
+            credit = prem_c + prem_p
+            be_up = otm_call + credit
+            be_dn = otm_put - credit
+            if credit > 0:
+                candidates.append(StrategyCandidate(
+                    "short_strangle", "neutral", "Short strangle (OTM)",
+                    [otm_put, otm_call], -credit, credit * 3,
+                    legs=[StrategyLeg("SELL", 1, "Put", otm_put, prem_p),
+                          StrategyLeg("SELL", 1, "Call", otm_call, prem_c)],
+                    expiry=expiry, max_profit=credit,
+                    max_profit_condition=f"${credit:,.0f} if {asset} stays in ${be_dn:,.0f}-${be_up:,.0f}",
+                ))
+        # Iron condor (reuse neutral logic for vol view — defined-risk short vol)
+        low_put = strikes[max(0, idx_atm - 3)]
+        high_call = strikes[min(len(strikes) - 1, idx_atm + 3)]
+        put_short = strikes[max(0, idx_atm - 1)]
+        call_short = strikes[min(len(strikes) - 1, idx_atm + 1)]
+        if low_put in puts and high_call in calls and put_short in puts and call_short in calls and low_put < current < high_call:
+            prem_ps = float(puts[put_short])
+            prem_pl = float(puts[low_put])
+            prem_cs = float(calls[call_short])
+            prem_ch = float(calls[high_call])
+            credit_put = prem_ps - prem_pl
+            credit_call = prem_cs - prem_ch
+            credit = credit_put + credit_call
+            if credit > 0:
+                max_width = max(put_short - low_put, high_call - call_short)
+                max_loss = max_width - credit
+                candidates.append(StrategyCandidate(
+                    "iron_condor", "neutral", "Iron condor (defined risk)",
+                    [put_short, call_short], -credit, max_loss,
+                    legs=[StrategyLeg("BUY", 1, "Put", low_put, prem_pl),
+                          StrategyLeg("SELL", 1, "Put", put_short, prem_ps),
+                          StrategyLeg("SELL", 1, "Call", call_short, prem_cs),
+                          StrategyLeg("BUY", 1, "Call", high_call, prem_ch)],
+                    expiry=expiry, max_profit=credit,
+                    max_profit_condition=f"${credit:,.0f} if {asset} between ${put_short:,.0f}-${call_short:,.0f} at expiry",
+                ))
     if not candidates and view == "neutral":
         if atm in calls:
             candidates.append(_long_call(atm, "Long call (ATM)"))
@@ -386,6 +475,20 @@ def strategy_pnl_values(strategy: StrategyCandidate, outcome_prices: list[float]
             k1, k2, k3 = strategy.strikes[0], strategy.strikes[1], strategy.strikes[2]
             gross_payoff = max(0.0, s - k1) - 2 * max(0.0, s - k2) + max(0.0, s - k3)
             pnl_values.append(gross_payoff - strategy.cost)
+        elif strategy.strategy_type == "long_straddle":
+            k = strategy.strikes[0]
+            pnl_values.append(max(0.0, s - k) + max(0.0, k - s) - strategy.cost)
+        elif strategy.strategy_type == "long_strangle":
+            k_put, k_call = strategy.strikes[0], strategy.strikes[1]
+            pnl_values.append(max(0.0, k_put - s) + max(0.0, s - k_call) - strategy.cost)
+        elif strategy.strategy_type == "short_straddle":
+            k = strategy.strikes[0]
+            credit = -strategy.cost
+            pnl_values.append(credit - max(0.0, s - k) - max(0.0, k - s))
+        elif strategy.strategy_type == "short_strangle":
+            k_put, k_call = strategy.strikes[0], strategy.strikes[1]
+            credit = -strategy.cost
+            pnl_values.append(credit - max(0.0, k_put - s) - max(0.0, s - k_call))
         else:
             pnl_values.append(0.0)
     return pnl_values
@@ -405,6 +508,10 @@ def _loss_profile(strategy: StrategyCandidate) -> str:
     st = strategy.strategy_type
     if st in ("bull_put_credit_spread", "bear_call_credit_spread", "iron_condor", "call_debit_spread", "put_debit_spread", "long_call_butterfly"):
         return "defined risk"
+    if st in ("long_straddle", "long_strangle"):
+        return "premium at risk"
+    if st in ("short_straddle", "short_strangle"):
+        return "unlimited risk"
     return "premium at risk"
 
 
@@ -473,6 +580,40 @@ def _risk_plan(strategy: StrategyCandidate) -> tuple[str, str, str]:
             f"Convert to directional spread if price drifts. Sell wing closer to price for partial recovery.",
             f"Max profit: ${mp:,.0f} at ${k[1]:,.0f}. Review near midpoint and at 25% time-to-expiry."
         )
+    if st == "long_straddle":
+        be_up = k[0] + cost
+        be_dn = k[0] - cost
+        return (
+            f"Close if premium decays below ${cost * 0.5:,.0f} (50%) without a move. Stop: price stuck near ${k[0]:,.0f}.",
+            f"Sell one leg to convert to directional if a trend emerges. Roll to next expiry if vol stays high.",
+            f"Breakevens: ${be_dn:,.0f} / ${be_up:,.0f}. Review at 50% time-to-expiry{exp}."
+        )
+    if st == "long_strangle":
+        be_dn = k[0] - cost
+        be_up = k[1] + cost
+        return (
+            f"Close if premium decays below ${cost * 0.5:,.0f} (50%) without a move. Stop: price stuck between ${k[0]:,.0f}-${k[1]:,.0f}.",
+            f"Sell one leg to convert to directional if a trend emerges. Roll to next expiry if vol stays high.",
+            f"Breakevens: ${be_dn:,.0f} / ${be_up:,.0f}. Review at 50% time-to-expiry{exp}."
+        )
+    if st == "short_straddle":
+        credit = -cost
+        be_up = k[0] + credit
+        be_dn = k[0] - credit
+        return (
+            f"Close if underlying moves beyond ${be_dn:,.0f}-${be_up:,.0f} (breakevens). Hard stop at 2x credit loss.",
+            f"Buy a wing to convert to iron butterfly if tested. Roll out for more credit if near expiry.",
+            f"Profit zone: ${be_dn:,.0f}-${be_up:,.0f}. Max credit: ${credit:,.0f}. Review every hour."
+        )
+    if st == "short_strangle":
+        credit = -cost
+        be_dn = k[0] - credit
+        be_up = k[1] + credit
+        return (
+            f"Close tested side if underlying breaches ${k[0]:,.0f} (put) or ${k[1]:,.0f} (call). Hard stop at 2x credit loss.",
+            f"Buy a wing to convert to iron condor if tested. Roll out for more credit if near expiry.",
+            f"Profit zone: ${k[0]:,.0f}-${k[1]:,.0f}. Max credit: ${credit:,.0f}. Review every hour."
+        )
     return (
         "Close on thesis break.",
         "Reduce to smaller defined-risk structure.",
@@ -503,6 +644,12 @@ def passes_hard_filters(strategy: StrategyCandidate, risk: RiskLevel, current_pr
         left = strategy.strikes[1] - strategy.strikes[0]
         right = strategy.strikes[2] - strategy.strikes[1]
         return left > 0 and right > 0 and strategy.cost <= max(left, right)
+    if st == "short_straddle":
+        return risk == "high" and (-strategy.cost) > 0
+    if st == "short_strangle":
+        return risk in ("medium", "high") and (-strategy.cost) > 0
+    if st in ("long_straddle", "long_strangle"):
+        return strategy.cost > 0
     return True
 
 
@@ -535,6 +682,10 @@ _DEFINED_RISK_TYPES = frozenset({
 })
 
 
+_LONG_VOL_TYPES = frozenset({"long_straddle", "long_strangle"})
+_SHORT_VOL_TYPES = frozenset({"short_straddle", "short_strangle", "iron_condor"})
+
+
 def rank_strategies(
     candidates: list[StrategyCandidate],
     fusion_state: FusionState,
@@ -545,11 +696,14 @@ def rank_strategies(
     confidence: float = 1.0,
     volatility_ratio: float = 1.0,
     cdf_values: list[float] | None = None,
+    vol_bias: VolBias | None = None,
 ) -> list[ScoredStrategy]:
     """Score and sort strategies. Returns list of ScoredStrategy sorted by score desc.
     volatility_ratio = forecast_vol / realized_vol (1.0 = normal). When elevated,
     defined-risk strategies get a bonus and naked/premium strategies get a penalty.
-    cdf_values enables probability-weighted PoP/EV when provided."""
+    cdf_values enables probability-weighted PoP/EV when provided.
+    vol_bias controls scoring for vol view: long_vol favours straddles/strangles,
+    short_vol favours iron condors and short straddles/strangles."""
     vol_elevated = volatility_ratio > 1.15
     scored: list[ScoredStrategy] = []
     for c in candidates:
@@ -558,29 +712,46 @@ def rank_strategies(
         pop, ev = compute_payoff_metrics(c, outcome_prices, cdf_values)
         pnl_values = strategy_pnl_values(c, outcome_prices)
         tail_risk = _tail_risk_from_pnl(pnl_values)
-        view_match = 1.0 if c.direction == view else (0.4 if c.direction == "neutral" else 0.1)
+        # View matching
+        if view == "vol":
+            if vol_bias == "long_vol" and c.strategy_type in _SHORT_VOL_TYPES:
+                continue  # don't recommend short vol when bias is long
+            if vol_bias == "short_vol" and c.strategy_type in _LONG_VOL_TYPES:
+                continue  # don't recommend long vol when bias is short
+            view_match = 1.3 if (
+                (vol_bias == "long_vol" and c.strategy_type in _LONG_VOL_TYPES)
+                or (vol_bias == "short_vol" and c.strategy_type in _SHORT_VOL_TYPES)
+            ) else 1.0
+        else:
+            view_match = 1.0 if c.direction == view else (0.4 if c.direction == "neutral" else 0.1)
         fusion_bonus = 0.0
-        if fusion_state == "aligned_bullish" and c.direction == "bullish":
-            fusion_bonus = 0.3
-        elif fusion_state == "aligned_bearish" and c.direction == "bearish":
-            fusion_bonus = 0.3
-        elif fusion_state in ("countermove", "unclear") and c.direction == "neutral":
-            fusion_bonus = 0.15
+        if view != "vol":
+            if fusion_state == "aligned_bullish" and c.direction == "bullish":
+                fusion_bonus = 0.3
+            elif fusion_state == "aligned_bearish" and c.direction == "bearish":
+                fusion_bonus = 0.3
+            elif fusion_state in ("countermove", "unclear") and c.direction == "neutral":
+                fusion_bonus = 0.15
         fit = view_match + fusion_bonus
         w_pop = 0.4 if risk == "low" else (0.3 if risk == "medium" else 0.2)
         w_ev = 0.2 if risk == "low" else (0.3 if risk == "medium" else 0.4)
         score = fit * 0.4 + pop * w_pop + max(0, ev) * w_ev * 0.01
         tail_penalty = (1 - pop) * 0.1 + min(0.2, tail_risk * 0.0001)
         score -= tail_penalty
-        if vol_elevated:
+        if vol_elevated and view != "vol":
             if c.strategy_type in _DEFINED_RISK_TYPES:
                 score += 0.15
             else:
                 score -= 0.10
-        score *= confidence
+        if view != "vol":
+            score *= confidence
         invalidation, reroute, review_time = _risk_plan(c)
         ev_pct = (ev / current_price * 100) if current_price > 0 else 0.0
-        vol_note = " [vol: prefer spreads]" if vol_elevated else ""
+        vol_note = ""
+        if view == "vol" and vol_bias:
+            vol_note = f" [vol bias: {vol_bias.replace('_', ' ')}]"
+        elif vol_elevated:
+            vol_note = " [vol: prefer spreads]"
         rationale = f"Fit {fit:.0%}, PoP {pop:.0%}, EV ${ev:,.0f} ({ev_pct:+.2f}%){vol_note}"
         scored.append(
             ScoredStrategy(
@@ -645,9 +816,80 @@ def is_volatility_elevated(forecast_vol: float, realized_vol: float) -> bool:
     return ratio > 1.3 or forecast_vol > realized_vol + 20
 
 
-def should_no_trade(fusion_state: FusionState, view: ViewBias, volatility_high: bool, confidence: float = 1.0) -> str | None:
+_SQRT_2PI = 2.5066282746310002  # sqrt(2 * pi)
+
+
+def _parse_tte_years(expiry_str: str) -> float | None:
+    """Parse expiry_time string to time-to-expiry in years. Returns None on failure."""
+    if not expiry_str:
+        return None
+    from datetime import datetime, timezone
+    try:
+        expiry_str = expiry_str.replace("Z", "+00:00")
+        exp_dt = datetime.fromisoformat(expiry_str)
+        now = datetime.now(timezone.utc)
+        delta = (exp_dt - now).total_seconds()
+        if delta <= 0:
+            return None
+        return delta / (365.25 * 86400)
+    except (ValueError, TypeError):
+        return None
+
+
+def estimate_implied_vol(option_data: dict, time_to_expiry_years: float | None = None) -> float:
+    """Estimate annualized implied volatility from ATM option premiums.
+    Uses Brenner-Subrahmanyam approximation: IV ≈ premium * sqrt(2π) / (price * sqrt(T)).
+    If time_to_expiry_years is not provided, parses expiry_time from option_data.
+    Returns IV as a percentage (e.g. 65.0 for 65%)."""
+    current = float(option_data.get("current_price", 0))
+    if current <= 0:
+        return 0.0
+    if time_to_expiry_years is None:
+        time_to_expiry_years = _parse_tte_years(option_data.get("expiry_time", ""))
+    if time_to_expiry_years is None or time_to_expiry_years <= 0:
+        time_to_expiry_years = 1 / 365  # fallback: 1 day
+    calls = {float(k): float(v) for k, v in (option_data.get("call_options") or {}).items()}
+    puts = {float(k): float(v) for k, v in (option_data.get("put_options") or {}).items()}
+    if not calls:
+        return 0.0
+    strikes = sorted(calls.keys())
+    atm = min(strikes, key=lambda s: abs(s - current))
+    atm_call = calls.get(atm, 0.0)
+    atm_put = puts.get(atm, 0.0)
+    # Average ATM premiums for better estimate (put-call parity smoothing)
+    premiums = [p for p in [atm_call, atm_put] if p > 0]
+    if not premiums:
+        return 0.0
+    avg_premium = sum(premiums) / len(premiums)
+    sqrt_t = time_to_expiry_years ** 0.5
+    iv = (avg_premium * _SQRT_2PI) / (current * sqrt_t) * 100
+    return iv
+
+
+def compare_volatility(synth_vol: float, implied_vol: float, threshold: float = 0.15) -> VolBias:
+    """Compare Synth forecasted vol vs market implied vol.
+    Returns long_vol if Synth > IV by threshold, short_vol if Synth < IV, else neutral_vol.
+    threshold is relative (0.15 = 15% divergence required)."""
+    if implied_vol <= 0 or synth_vol <= 0:
+        return "neutral_vol"
+    ratio = synth_vol / implied_vol
+    if ratio > 1 + threshold:
+        return "long_vol"
+    if ratio < 1 - threshold:
+        return "short_vol"
+    return "neutral_vol"
+
+
+def should_no_trade(fusion_state: FusionState, view: ViewBias, volatility_high: bool, confidence: float = 1.0,
+                    vol_bias: VolBias | None = None) -> str | None:
     """Guardrail: no trade when confidence low or signals conflict.
     Returns a reason string if no-trade, or None if trading is OK."""
+    if view == "vol":
+        # Confidence measures directional forecast tightness — irrelevant for vol trades.
+        # The vol edge comes from the IV vs Synth vol divergence, guarded by vol_bias.
+        if vol_bias == "neutral_vol":
+            return "No vol edge — Synth forecast vol and implied vol are similar. No clear long/short vol trade."
+        return None
     if volatility_high:
         return "Volatility elevated — forecast significantly above recent realized."
     if confidence < 0.25:

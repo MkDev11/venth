@@ -15,6 +15,8 @@ from pipeline import (
     should_no_trade,
     forecast_confidence,
     is_volatility_elevated,
+    estimate_implied_vol,
+    compare_volatility,
     _outcome_prices_with_probs,
     _outcome_prices_and_cdf,
     _percentile_weights,
@@ -400,3 +402,286 @@ def test_forecast_path_uses_real_time_labels():
     assert any("0h" in line for line in lines_24h)
     assert any("24h" in line for line in lines_24h)
     assert any("median" in line for line in lines_24h)  # column header
+
+
+# ── Volatility Trading Tests ──────────────────────────────────────
+
+VOL_OPTION_DATA = {
+    "current_price": 67723,
+    "call_options": {"66500": 1400, "67000": 987, "67500": 640, "68000": 373, "68500": 197, "69000": 90},
+    "put_options": {"66500": 57, "67000": 140, "67500": 291, "68000": 526, "68500": 850, "69000": 1200},
+}
+
+
+def test_estimate_implied_vol_positive():
+    iv = estimate_implied_vol(VOL_OPTION_DATA)
+    assert iv > 0
+    # ATM strike ~67500, avg premium ~(640+291)/2 = 465.5
+    # IV should be a reasonable annualized percentage
+    assert 10 < iv < 500
+
+
+def test_estimate_implied_vol_scales_with_premium():
+    low_prem = {"current_price": 100, "call_options": {"100": 2}, "put_options": {"100": 2}}
+    high_prem = {"current_price": 100, "call_options": {"100": 10}, "put_options": {"100": 10}}
+    iv_low = estimate_implied_vol(low_prem)
+    iv_high = estimate_implied_vol(high_prem)
+    assert iv_high > iv_low
+
+
+def test_estimate_implied_vol_empty_data():
+    assert estimate_implied_vol({}) == 0.0
+    assert estimate_implied_vol({"current_price": 0}) == 0.0
+    assert estimate_implied_vol({"current_price": 100}) == 0.0
+
+
+def test_compare_volatility_long_vol():
+    assert compare_volatility(80, 60) == "long_vol"  # 80/60 = 1.33 > 1.15
+
+
+def test_compare_volatility_short_vol():
+    assert compare_volatility(50, 80) == "short_vol"  # 50/80 = 0.625 < 0.85
+
+
+def test_compare_volatility_neutral():
+    assert compare_volatility(60, 60) == "neutral_vol"
+    assert compare_volatility(65, 60) == "neutral_vol"  # 1.083 — within threshold
+
+
+def test_compare_volatility_edge_cases():
+    assert compare_volatility(0, 60) == "neutral_vol"
+    assert compare_volatility(60, 0) == "neutral_vol"
+
+
+def test_generate_strategies_vol_view_has_straddle():
+    candidates = generate_strategies(VOL_OPTION_DATA, "vol", "medium")
+    types = [c.strategy_type for c in candidates]
+    assert "long_straddle" in types
+    assert "long_strangle" in types
+    assert "iron_condor" in types
+
+
+def test_generate_strategies_vol_high_risk_has_short_straddle():
+    candidates = generate_strategies(VOL_OPTION_DATA, "vol", "high")
+    types = [c.strategy_type for c in candidates]
+    assert "short_straddle" in types
+    assert "short_strangle" in types
+
+
+def test_generate_strategies_vol_low_risk_no_short_straddle():
+    candidates = generate_strategies(VOL_OPTION_DATA, "vol", "low")
+    types = [c.strategy_type for c in candidates]
+    assert "short_straddle" not in types
+    assert "short_strangle" not in types
+    assert "long_straddle" in types
+
+
+def test_long_straddle_pnl():
+    strat = StrategyCandidate(
+        "long_straddle", "neutral", "Long straddle", [100], 10, 10,
+        legs=[StrategyLeg("BUY", 1, "Call", 100, 6),
+              StrategyLeg("BUY", 1, "Put", 100, 4)],
+    )
+    pnl = strategy_pnl_values(strat, [80, 90, 100, 110, 120])
+    assert pnl[0] == 10.0   # |100-80| - 10 = 10
+    assert pnl[2] == -10.0  # at strike: payoff=0, loss=premium
+    assert pnl[4] == 10.0   # |120-100| - 10 = 10
+    # Symmetric around strike
+    assert pnl[0] == pnl[4]
+    assert pnl[1] == pnl[3]
+
+
+def test_long_strangle_pnl():
+    strat = StrategyCandidate(
+        "long_strangle", "neutral", "Long strangle", [95, 105], 8, 8,
+        legs=[StrategyLeg("BUY", 1, "Put", 95, 3),
+              StrategyLeg("BUY", 1, "Call", 105, 5)],
+    )
+    pnl = strategy_pnl_values(strat, [80, 95, 100, 105, 120])
+    assert pnl[0] == 7.0    # max(95-80,0) + max(80-105,0) - 8 = 15-8 = 7
+    assert pnl[1] == -8.0   # at put strike: payoff=0
+    assert pnl[2] == -8.0   # between strikes: no payoff
+    assert pnl[3] == -8.0   # at call strike: payoff=0
+    assert pnl[4] == 7.0    # max(95-120,0) + max(120-105,0) - 8 = 15-8 = 7
+
+
+def test_short_straddle_pnl():
+    strat = StrategyCandidate(
+        "short_straddle", "neutral", "Short straddle", [100], -10, 30,
+        legs=[StrategyLeg("SELL", 1, "Call", 100, 6),
+              StrategyLeg("SELL", 1, "Put", 100, 4)],
+    )
+    pnl = strategy_pnl_values(strat, [80, 90, 100, 110, 120])
+    assert pnl[2] == 10.0    # at strike: keep full credit
+    assert pnl[0] == -10.0   # 10 - |100-80| = 10 - 20 = -10
+    assert pnl[4] == -10.0   # 10 - |120-100| = 10 - 20 = -10
+
+
+def test_short_strangle_pnl():
+    strat = StrategyCandidate(
+        "short_strangle", "neutral", "Short strangle", [95, 105], -8, 24,
+        legs=[StrategyLeg("SELL", 1, "Put", 95, 3),
+              StrategyLeg("SELL", 1, "Call", 105, 5)],
+    )
+    pnl = strategy_pnl_values(strat, [80, 95, 100, 105, 120])
+    assert pnl[2] == 8.0     # between strikes: keep full credit
+    assert pnl[0] == -7.0    # 8 - max(95-80,0) - max(80-105,0) = 8-15 = -7
+    assert pnl[4] == -7.0    # 8 - max(95-120,0) - max(120-105,0) = 8-15 = -7
+
+
+def test_should_no_trade_vol_neutral_vol():
+    result = should_no_trade("aligned_bullish", "vol", False, confidence=0.8, vol_bias="neutral_vol")
+    assert result is not None
+    assert "no vol edge" in result.lower() or "similar" in result.lower()
+
+
+def test_should_no_trade_vol_long_vol_ok():
+    result = should_no_trade("aligned_bullish", "vol", False, confidence=0.8, vol_bias="long_vol")
+    assert result is None
+
+
+def test_should_no_trade_vol_low_confidence_still_trades():
+    # Confidence measures directional tightness — irrelevant for vol trades.
+    result = should_no_trade("aligned_bullish", "vol", False, confidence=0.1, vol_bias="long_vol")
+    assert result is None, "Low confidence should NOT block vol trades"
+
+
+def test_should_no_trade_vol_ignores_volatility_high():
+    # Vol view should NOT trigger the "volatility elevated" guardrail
+    result = should_no_trade("aligned_bullish", "vol", True, confidence=0.8, vol_bias="long_vol")
+    assert result is None
+
+
+def test_rank_strategies_vol_long_bias_prefers_long_straddle():
+    straddle = StrategyCandidate("long_straddle", "neutral", "Straddle", [10000], 10, 10)
+    condor = StrategyCandidate("iron_condor", "neutral", "Condor", [9500, 10500], -5, 5)
+    outcomes = [8000, 9000, 10000, 11000, 12000]
+    scored = rank_strategies(
+        [straddle, condor], "unclear", "vol", outcomes, "medium", 10000,
+        vol_bias="long_vol",
+    )
+    # Condor (short vol) is filtered out when bias is long_vol
+    assert len(scored) == 1
+    assert scored[0].strategy.strategy_type == "long_straddle"
+
+
+def test_rank_strategies_vol_short_bias_prefers_condor():
+    # Use tight outcomes (±2%) where iron condor profits and straddle loses
+    straddle = StrategyCandidate("long_straddle", "neutral", "Straddle", [10000], 300, 300)
+    condor = StrategyCandidate("iron_condor", "neutral", "Condor", [9800, 10200], -150, 50)
+    outcomes = [9850, 9900, 9950, 10000, 10050, 10100, 10150]
+    scored = rank_strategies(
+        [straddle, condor], "unclear", "vol", outcomes, "medium", 10000,
+        vol_bias="short_vol",
+    )
+    # Straddle (long vol) is filtered out when bias is short_vol
+    assert len(scored) == 1
+    assert scored[0].strategy.strategy_type == "iron_condor"
+
+
+def test_vol_strategies_have_legs():
+    candidates = generate_strategies(VOL_OPTION_DATA, "vol", "high", asset="BTC", expiry="2026-03-01")
+    for c in candidates:
+        assert len(c.legs) >= 2, f"{c.description} should have >= 2 legs"
+        assert c.expiry == "2026-03-01"
+        for leg in c.legs:
+            assert leg.action in ("BUY", "SELL")
+            assert leg.option_type in ("Call", "Put")
+            assert leg.premium > 0
+
+
+def test_loss_profile_vol_types():
+    from pipeline import _loss_profile
+    straddle = StrategyCandidate("long_straddle", "neutral", "S", [100], 10, 10)
+    assert _loss_profile(straddle) == "premium at risk"
+    strangle = StrategyCandidate("long_strangle", "neutral", "S", [95, 105], 8, 8)
+    assert _loss_profile(strangle) == "premium at risk"
+    ss = StrategyCandidate("short_straddle", "neutral", "S", [100], -10, 30)
+    assert _loss_profile(ss) == "unlimited risk"
+    sstr = StrategyCandidate("short_strangle", "neutral", "S", [95, 105], -8, 24)
+    assert _loss_profile(sstr) == "unlimited risk"
+
+
+def test_risk_plan_long_straddle():
+    from pipeline import _risk_plan
+    strat = StrategyCandidate("long_straddle", "neutral", "Straddle", [100], 10, 10, expiry="2026-03-01")
+    inv, adj, review = _risk_plan(strat)
+    assert "$5" in inv  # 50% of $10
+    assert "90" in review and "110" in review  # breakevens
+    assert "2026-03-01" in review
+
+
+def test_risk_plan_short_straddle():
+    from pipeline import _risk_plan
+    strat = StrategyCandidate("short_straddle", "neutral", "Short straddle", [100], -10, 30)
+    inv, adj, review = _risk_plan(strat)
+    assert "90" in inv and "110" in inv  # breakevens
+    assert "iron butterfly" in adj.lower() or "wing" in adj.lower()
+
+
+def test_hard_filters_short_straddle_requires_high_risk():
+    from pipeline import passes_hard_filters
+    ss = StrategyCandidate("short_straddle", "neutral", "SS", [100], -10, 30)
+    assert passes_hard_filters(ss, "high", 1000) is True
+    assert passes_hard_filters(ss, "medium", 1000) is False
+    assert passes_hard_filters(ss, "low", 1000) is False
+
+
+def test_hard_filters_short_strangle_requires_medium_plus():
+    from pipeline import passes_hard_filters
+    ss = StrategyCandidate("short_strangle", "neutral", "SS", [95, 105], -8, 24)
+    assert passes_hard_filters(ss, "high", 1000) is True
+    assert passes_hard_filters(ss, "medium", 1000) is True
+    assert passes_hard_filters(ss, "low", 1000) is False
+
+
+def test_risk_plan_long_strangle():
+    from pipeline import _risk_plan
+    strat = StrategyCandidate("long_strangle", "neutral", "Strangle", [95, 105], 8, 8, expiry="2026-03-01")
+    inv, adj, review = _risk_plan(strat)
+    assert "$4" in inv  # 50% of $8
+    assert "95" in inv and "105" in inv  # stuck between strikes
+    assert "87" in review and "113" in review  # breakevens: 95-8=87, 105+8=113
+    assert "2026-03-01" in review
+
+
+def test_risk_plan_short_strangle():
+    from pipeline import _risk_plan
+    strat = StrategyCandidate("short_strangle", "neutral", "Short strangle", [95, 105], -8, 24)
+    inv, adj, review = _risk_plan(strat)
+    assert "95" in inv and "105" in inv  # short strikes in invalidation
+    assert "iron condor" in adj.lower() or "wing" in adj.lower()
+    assert "$8" in review  # max credit
+
+
+def test_estimate_implied_vol_uses_expiry_time():
+    """estimate_implied_vol should parse expiry_time for TTL instead of always using 1-day default."""
+    data_no_expiry = {"current_price": 100, "call_options": {"100": 5}, "put_options": {"100": 5}}
+    iv_no_expiry = estimate_implied_vol(data_no_expiry)
+    # With explicit TTL override, different TTL should produce different IV
+    iv_1day = estimate_implied_vol(data_no_expiry, time_to_expiry_years=1 / 365)
+    iv_7day = estimate_implied_vol(data_no_expiry, time_to_expiry_years=7 / 365)
+    assert iv_1day > iv_7day  # shorter TTL → higher annualized IV
+    assert iv_no_expiry == iv_1day  # no expiry → fallback to 1-day
+
+
+def test_estimate_implied_vol_with_future_expiry():
+    """When expiry_time is in the future, TTL should be parsed and used."""
+    from pipeline import _parse_tte_years
+    tte = _parse_tte_years("2030-01-01 00:00:00Z")
+    assert tte is not None
+    assert tte > 0
+    # Expired option
+    tte_past = _parse_tte_years("2020-01-01 00:00:00Z")
+    assert tte_past is None
+    # Empty/invalid
+    assert _parse_tte_years("") is None
+    assert _parse_tte_years("not-a-date") is None
+
+
+def test_vol_rationale_contains_vol_bias():
+    strat = StrategyCandidate("long_straddle", "neutral", "Straddle", [68000], 930, 930)
+    outcomes = [65000, 66500, 67500, 68000, 68500, 69500, 72000]
+    scored = rank_strategies([strat], "unclear", "vol", outcomes, "medium", 68000, vol_bias="long_vol")
+    assert len(scored) >= 1
+    assert "vol bias" in scored[0].rationale.lower()
