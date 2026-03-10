@@ -729,15 +729,30 @@ function loadTradeHistory() {
   var html = '';
   history.forEach(function(h) {
     var dirClass = h.long ? 'positive' : 'negative';
-    var pnlVal = parseFloat(h.pnlUsd || '0');
-    var pnlPctVal = parseFloat(h.pnlPct || '0');
-    var pnlClass = pnlVal >= 0 ? 'positive' : 'negative';
-    var pnlSign = pnlVal >= 0 ? '+' : '';
-    var pnlHtml = '<span class="trade-pnl ' + pnlClass + '">' +
-      pnlSign + pnlVal.toFixed(2) + ' USDC (' + pnlSign + pnlPctVal.toFixed(1) + '%)</span>';
+    var pnlHtml = '';
+    if (h.pnlUsd === 'pending' || h.pnlPct === 'pending') {
+      pnlHtml = '<span class="trade-pnl" style="color:var(--text-muted)">P&L pending...</span>';
+    } else {
+      var pnlVal = parseFloat(h.pnlUsd || '0');
+      var pnlPctVal = parseFloat(h.pnlPct || '0');
+      var pnlClass = pnlVal >= 0 ? 'positive' : 'negative';
+      var pnlSign = pnlVal >= 0 ? '+' : '';
+      pnlHtml = '<span class="trade-pnl ' + pnlClass + '">' +
+        pnlSign + pnlVal.toFixed(2) + ' USDC (' + pnlSign + pnlPctVal.toFixed(1) + '%)</span>';
+    }
     var txLink = h.txHash
       ? ' <a href="https://arbiscan.io/tx/' + h.txHash + '" target="_blank" rel="noopener" style="color:var(--accent);font-size:10px">tx</a>'
       : '';
+    // Format timestamp
+    var timeStr = '';
+    if (h.closedAt) {
+      var d = new Date(h.closedAt);
+      var ago = Math.floor((Date.now() - d.getTime()) / 1000);
+      if (ago < 60) timeStr = ago + 's ago';
+      else if (ago < 3600) timeStr = Math.floor(ago / 60) + 'm ago';
+      else if (ago < 86400) timeStr = Math.floor(ago / 3600) + 'h ago';
+      else timeStr = d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+    }
     html += '<div class="open-trade-row history-row">' +
       '<div class="trade-row-info">' +
       '<div class="trade-row-main">' +
@@ -745,6 +760,7 @@ function loadTradeHistory() {
       '<span>' + (h.pairLabel || '?') + '</span>' +
       '<span>Entry: $' + (h.entryPrice || '?') + ' / Close: $' + (h.closePrice || '?') + '</span>' +
       '<span>' + (h.collateral || '?') + ' USDC</span>' +
+      (timeStr ? '<span style="color:var(--text-muted)">' + timeStr + '</span>' : '') +
       '</div>' +
       '<div class="trade-row-pnl">' + pnlHtml + txLink + '</div>' +
       '</div>' +
@@ -800,10 +816,11 @@ async function closeTrade(tradeIndex, pairIndex) {
       return;
     }
 
-    // Snapshot USDC balance before close to compute actual P&L after
+    // Snapshot USDC balance before close (oracle callback transfers USDC in a later tx)
     var erc20Abi = ['function balanceOf(address) view returns (uint256)'];
     var usdcContract = new ethers.Contract(gtradeConfig.usdc_contract, erc20Abi, walletState.provider);
-    var balBefore = Number(ethers.formatUnits(await usdcContract.balanceOf(walletState.address), gtradeConfig.usdc_decimals));
+    var balBefore = Number(ethers.formatUnits(
+      await usdcContract.balanceOf(walletState.address), gtradeConfig.usdc_decimals));
 
     var closeAbi = ['function closeTradeMarket(uint32 _index, uint64 _expectedPrice)'];
     var diamond = new ethers.Contract(gtradeConfig.trading_contract, closeAbi, walletState.signer);
@@ -811,21 +828,51 @@ async function closeTrade(tradeIndex, pairIndex) {
     var tx = await diamond.closeTradeMarket(tradeIndex, expectedPrice, { gasLimit: 3000000 });
     showToast('Close submitted. Waiting for confirmation...', 'info', 20000);
     var receipt = await tx.wait();
-    showToast(
-      'Position closed! <a href="https://arbiscan.io/tx/' + receipt.hash + '" target="_blank" rel="noopener">View on Arbiscan</a>',
-      'success', 10000
-    );
-    // Compute actual P&L from USDC balance change (accounts for ALL fees)
-    var balAfter = Number(ethers.formatUnits(await usdcContract.balanceOf(walletState.address), gtradeConfig.usdc_decimals));
+
+    // Immediately update UI: remove closed trade from open positions list
     var cached = _openTradesCache[tradeIndex] || {};
+    delete _openTradesCache[tradeIndex];
+    var openContainer = document.getElementById('open-trades-list');
+    if (openContainer) {
+      var btns = openContainer.querySelectorAll('.close-trade-btn');
+      btns.forEach(function(btn) {
+        if (btn.getAttribute('onclick') && btn.getAttribute('onclick').indexOf('closeTrade(' + tradeIndex + ',') !== -1) {
+          var row = btn.closest('.open-trade-row');
+          if (row) row.remove();
+        }
+      });
+      if (!openContainer.querySelector('.open-trade-row')) {
+        openContainer.innerHTML = '<div class="no-trades">No open positions</div>';
+      }
+    }
+
+    showToast(
+      'Position closed! Waiting for oracle settlement... <a href="https://arbiscan.io/tx/' + receipt.hash + '" target="_blank" rel="noopener">View on Arbiscan</a>',
+      'success', 25000
+    );
+
+    // gTrade two-step: closeTradeMarket initiates close, oracle callback
+    // settles it in a separate tx. Poll balance until USDC arrives.
     var closePriceFloat = Number(expectedPrice) / 1e10;
     var entryP = cached.openPrice ? parseFloat(cached.openPrice) / 1e10 : 0;
     var colIdx = parseInt(cached.collateralIndex || '3');
     var colDec = (colIdx === 3) ? 6 : 18;
     var colNum = cached.collateralAmount ? Number(BigInt(cached.collateralAmount)) / Math.pow(10, colDec) : 0;
+
+    // Poll for oracle callback (up to 30s, every 2s)
+    var balAfter = balBefore;
+    for (var attempt = 0; attempt < 15; attempt++) {
+      await new Promise(function(r) { setTimeout(r, 2000); });
+      balAfter = Number(ethers.formatUnits(
+        await usdcContract.balanceOf(walletState.address), gtradeConfig.usdc_decimals));
+      if (Math.abs(balAfter - balBefore) > 0.001) break;
+    }
+
     var usdcReturned = balAfter - balBefore;
     var actualPnlUsd = usdcReturned - colNum;
     var pnlPct = colNum > 0 ? (actualPnlUsd / colNum) * 100 : 0;
+    // If balance didn't change (oracle slow or full loss), mark as pending
+    var pnlResolved = Math.abs(balAfter - balBefore) > 0.001;
     saveTradeToHistory({
       pairLabel: cached.pairLabel || ('Pair #' + pairIndex),
       dir: cached.dir || '?',
@@ -834,13 +881,17 @@ async function closeTrade(tradeIndex, pairIndex) {
       collateral: colNum.toFixed(2),
       entryPrice: entryP.toFixed(2),
       closePrice: closePriceFloat.toFixed(2),
-      pnlUsd: actualPnlUsd.toFixed(2),
-      pnlPct: pnlPct.toFixed(1),
+      pnlUsd: pnlResolved ? actualPnlUsd.toFixed(2) : 'pending',
+      pnlPct: pnlResolved ? pnlPct.toFixed(1) : 'pending',
       txHash: receipt.hash,
       closedAt: new Date().toISOString()
     });
+    loadTradeHistory();
     await refreshUSDCBalance();
-    // Poll for backend to index the closed trade
+    if (pnlResolved) {
+      showToast('Settlement complete: ' + (actualPnlUsd >= 0 ? '+' : '') + actualPnlUsd.toFixed(2) + ' USDC', actualPnlUsd >= 0 ? 'success' : 'error', 8000);
+    }
+    // Poll for backend to sync
     pollOpenTrades(5, 3000);
   } catch (e) {
     var msg = e.reason || e.shortMessage || e.message || 'Close trade failed';
