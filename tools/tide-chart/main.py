@@ -946,8 +946,10 @@ def create_app(client=None) -> Flask:
         direction = body.get("direction", "")
         leverage = body.get("leverage", 0)
         collateral_usd = body.get("collateral_usd", 0)
+        sl_pct = body.get("sl_pct", 0)
+        tp_pct = body.get("tp_pct", 0)
 
-        valid, error = validate_trade_params(asset, direction, leverage, collateral_usd)
+        valid, error = validate_trade_params(asset, direction, leverage, collateral_usd, sl_pct, tp_pct)
         if not valid:
             return jsonify({"valid": False, "error": error}), 400
 

@@ -24,10 +24,12 @@ USDC_DECIMALS = 6
 USDC_COLLATERAL_INDEX = 3
 
 # Per-group protocol limits enforced by gTrade smart contracts
+# Source: https://docs.gains.trade/gtrade-leveraged-trading/asset-classes/
 GROUP_LIMITS = {
     "crypto": {"min_leverage": 2, "max_leverage": 150, "min_position_usd": 1500, "max_collateral_usd": 100_000},
-    "stocks": {"min_leverage": 2, "max_leverage": 150, "min_position_usd": 1500, "max_collateral_usd": 100_000},
+    "stocks": {"min_leverage": 1.1, "max_leverage": 50, "min_position_usd": 1500, "max_collateral_usd": 100_000},
     "commodities": {"min_leverage": 2, "max_leverage": 150, "min_position_usd": 1500, "max_collateral_usd": 100_000},
+    "commodities_t1": {"min_leverage": 2, "max_leverage": 250, "min_position_usd": 1500, "max_collateral_usd": 100_000},
 }
 
 # Tide Chart ticker -> gTrade pair mapping (all Synth API assets)
@@ -35,7 +37,7 @@ GTRADE_PAIRS = {
     "BTC": {"name": "BTC/USD", "group_index": 0, "group": "crypto"},
     "ETH": {"name": "ETH/USD", "group_index": 0, "group": "crypto"},
     "SOL": {"name": "SOL/USD", "group_index": 0, "group": "crypto"},
-    "XAU": {"name": "XAU/USD", "group_index": 4, "group": "commodities"},
+    "XAU": {"name": "XAU/USD", "group_index": 4, "group": "commodities_t1"},
     "SPY": {"name": "SPY/USD", "group_index": 3, "group": "stocks"},
     "NVDA": {"name": "NVDA/USD", "group_index": 3, "group": "stocks"},
     "TSLA": {"name": "TSLA/USD", "group_index": 3, "group": "stocks"},
@@ -67,11 +69,18 @@ def get_asset_limits(asset: str) -> dict:
     return GROUP_LIMITS.get(pair["group"], {})
 
 
+# gTrade enforces max SL so that (SL% * leverage) does not exceed this threshold
+MAX_SL_LEVERAGE_PRODUCT = 75  # 75% of collateral
+MAX_TP_PCT = 900  # gTrade max TP percentage
+
+
 def validate_trade_params(
     asset: str,
     direction: str,
     leverage: float,
     collateral_usd: float,
+    sl_pct: float = 0,
+    tp_pct: float = 0,
 ) -> tuple[bool, str]:
     """Validate trade parameters against gTrade protocol limits.
 
@@ -105,6 +114,18 @@ def validate_trade_params(
     position_usd = collateral_usd * leverage
     if position_usd < min_pos:
         return False, f"Position size (${position_usd:,.0f}) below minimum ${min_pos:,}"
+
+    # SL validation: SL% * leverage must not exceed ~75% of collateral
+    if sl_pct > 0:
+        sl_impact = sl_pct * leverage / 100
+        max_sl = MAX_SL_LEVERAGE_PRODUCT
+        if sl_impact > max_sl:
+            max_allowed_sl = max_sl * 100 / leverage
+            return False, f"Stop loss too wide: {sl_pct}% × {leverage}x = {sl_impact:.0f}% loss. Max SL at {leverage}x is {max_allowed_sl:.1f}%"
+
+    # TP validation: gTrade caps TP at 900%
+    if tp_pct > MAX_TP_PCT:
+        return False, f"Take profit cannot exceed {MAX_TP_PCT}%"
 
     return True, ""
 
