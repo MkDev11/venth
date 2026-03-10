@@ -203,6 +203,26 @@ function validateTradeClient() {
     return;
   }
 
+  // Guard: SL too wide for leverage (gTrade enforces SL% * leverage <= 75% of collateral)
+  var slPct = parseFloat((document.getElementById('trade-sl') || {}).value) || 0;
+  var tpPct = parseFloat((document.getElementById('trade-tp') || {}).value) || 0;
+  if (slPct > 0 && leverage > 0) {
+    var slImpact = slPct * leverage;
+    if (slImpact > 75) {
+      var maxSl = (75 / leverage).toFixed(1);
+      execBtn.disabled = true;
+      execBtn.textContent = 'Max SL at ' + leverage + 'x: ' + maxSl + '%';
+      return;
+    }
+  }
+
+  // Guard: TP exceeds gTrade max (900%)
+  if (tpPct > 900) {
+    execBtn.disabled = true;
+    execBtn.textContent = 'Max TP: 900%';
+    return;
+  }
+
   // Guard: insufficient USDC balance
   var usdcBal = parseFloat(walletState.usdcBalance) || 0;
   if (usdcBal < collateral) {
@@ -448,20 +468,22 @@ async function executeTrade() {
   var openPriceScaled = BigInt(Math.round(currentPrice * 1e10));
 
   // TP/SL as absolute prices in 1e10 precision
+  // Long: TP above entry, SL below. Short: TP below entry, SL above.
   var tpScaled = 0;
   var slScaled = 0;
-  if (tpPct > 0) {
-    tpScaled = BigInt(Math.round(currentPrice * (1 + tpPct / 100) * 1e10));
-  }
-  if (slPct > 0) {
-    slScaled = BigInt(Math.round(currentPrice * (1 - slPct / 100) * 1e10));
+  if (direction === 'long') {
+    if (tpPct > 0) tpScaled = BigInt(Math.round(currentPrice * (1 + tpPct / 100) * 1e10));
+    if (slPct > 0) slScaled = BigInt(Math.round(currentPrice * (1 - slPct / 100) * 1e10));
+  } else {
+    if (tpPct > 0) tpScaled = BigInt(Math.round(currentPrice * (1 - tpPct / 100) * 1e10));
+    if (slPct > 0) slScaled = BigInt(Math.round(currentPrice * (1 + slPct / 100) * 1e10));
   }
 
   // Server-side validation (mirrors client-side guards)
   var valResp = await fetch('/api/gtrade/validate-trade', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ asset: asset, direction: direction, leverage: leverage, collateral_usd: collateral })
+    body: JSON.stringify({ asset: asset, direction: direction, leverage: leverage, collateral_usd: collateral, sl_pct: slPct, tp_pct: tpPct })
   });
   var valData = await valResp.json();
   if (!valData.valid) {
