@@ -168,14 +168,52 @@
     return null;
   }
 
+  /**
+   * Best-effort scraper for the user's Polymarket USD/USDC balance.
+   * Returns a float balance in dollars, or null if not found.
+   */
+  function scrapeBalance() {
+    var root = document.body;
+    if (!root) return null;
+
+    var textNodes = root.querySelectorAll("div, span, button, p");
+    var best = null;
+
+    for (var i = 0; i < textNodes.length; i++) {
+      var el = textNodes[i];
+      var txt = (el.textContent || "").trim();
+      if (!txt || txt.length > 40) continue;
+
+      // Look for patterns like "Balance 123.45 USDC" or "$123.45"
+      if (/balance/i.test(txt) || /USDC/i.test(txt) || /\$/i.test(txt)) {
+        var m = txt.match(/(\$?\s*\d{1,3}(?:[,\d]{0,3})*(?:\.\d{1,2})?)/);
+        if (m) {
+          var cleaned = m[1].replace(/\$/g, "").replace(/,/g, "").trim();
+          var val = parseFloat(cleaned);
+          if (!isNaN(val) && val > 0) {
+            best = val;
+            break;
+          }
+        }
+      }
+    }
+
+    if (best != null) {
+      console.log("[Synth-Overlay] Detected balance from DOM:", best);
+    }
+    return best;
+  }
+
   function getContext() {
     var livePrices = scrapeLivePrices();
+    var balance = scrapeBalance();
     return {
       slug: slugFromPage(),
       url: window.location.href,
       host: window.location.hostname,
       pageUpdatedAt: Date.now(),
       livePrices: livePrices,
+      balance: balance,
     };
   }
 
