@@ -31,6 +31,12 @@ const els = {
   lastUpdate: document.getElementById("lastUpdate"),
   refreshBtn: document.getElementById("refreshBtn"),
   pollProgress: document.getElementById("pollProgress"),
+  // Kelly sizing
+  balanceInput: document.getElementById("balanceInput"),
+  kellySide: document.getElementById("kellySide"),
+  kellyFraction: document.getElementById("kellyFraction"),
+  kellySize: document.getElementById("kellySize"),
+  kellyEv: document.getElementById("kellyEv"),
 };
 
 function fmtCentsFromProb(p) {
@@ -135,6 +141,196 @@ const EMPTY = {
   confPct: 0, confColor: "#9ca3af", confText: "—",
   lastUpdate: "—",
 };
+
+// ---- Kelly position sizing ----
+
+var BALANCE_KEY = "synth_kelly_balance";
+
+function loadStoredBalance(callback) {
+  if (!chrome.storage || !chrome.storage.local) {
+    callback(null);
+    return;
+  }
+  chrome.storage.local.get([BALANCE_KEY], function (res) {
+    var v = res && typeof res[BALANCE_KEY] === "number" ? res[BALANCE_KEY] : null;
+    callback(v);
+  });
+}
+
+function saveStoredBalance(val) {
+  if (!chrome.storage || !chrome.storage.local) return;
+  if (typeof val !== "number" || !isFinite(val) || val < 0) return;
+  var obj = {};
+  obj[BALANCE_KEY] = val;
+  chrome.storage.local.set(obj);
+}
+
+function clamp(v, min, max) {
+  return Math.min(max, Math.max(min, v));
+}
+
+function formatUsd(v) {
+  if (v == null || !isFinite(v)) return "—";
+  return "$" + v.toFixed(2);
+}
+
+function formatPct(v) {
+  if (v == null || !isFinite(v)) return "—";
+  return (v * 100).toFixed(1) + "%";
+}
+
+// Compute Kelly fraction and EV for YES/NO given Synth and market probabilities.
+function computeKellySizing(opts) {
+  var pSynth = opts.pSynth;
+  var pMarket = opts.pMarket;
+  var confidence = opts.confidence != null ? opts.confidence : 0.5;
+  var balance = opts.balance;
+
+  if (pSynth == null || pMarket == null || !isFinite(pSynth) || !isFinite(pMarket)) {
+    return null;
+  }
+  if (pMarket <= 0 || pMarket >= 1 || pSynth <= 0 || pSynth >= 1) {
+    return null;
+  }
+
+  // EV per $ for YES/NO (binary market, cost = p_market, payout = 1)
+  var evYes = pSynth - pMarket;
+  var pNoSynth = 1 - pSynth;
+  var pNoMarket = 1 - pMarket;
+  var evNo = pNoSynth - pNoMarket;
+
+  // Kelly fractions
+  function kellyFraction(trueP, marketP) {
+    var b = (1 - marketP) / marketP;
+    var q = 1 - trueP;
+    var f = (b * trueP - q) / b;
+    if (!isFinite(f)) return 0;
+    return f;
+  }
+
+  var fYes = kellyFraction(pSynth, pMarket);
+  var fNo = kellyFraction(pNoSynth, pNoMarket);
+
+  var side = null;
+  var rawF = 0;
+  var evPerDollar = 0;
+
+  if (evYes > 0 && fYes > 0 && (evYes >= evNo || evNo <= 0 || fNo <= 0)) {
+    side = "YES";
+    rawF = fYes;
+    evPerDollar = evYes;
+  } else if (evNo > 0 && fNo > 0) {
+    side = "NO";
+    rawF = fNo;
+    evPerDollar = evNo;
+  } else {
+    return {
+      side: null,
+      fraction: 0,
+      sizedAmount: balance != null ? 0 : null,
+      evPerDollar: 0,
+    };
+  }
+
+  // Scale Kelly by confidence and cap fraction
+  var confScale = clamp(confidence, 0, 1);
+  var maxKelly = 0.2; // 20% cap
+  var scaledF = clamp(rawF * confScale, 0, maxKelly);
+
+  var sizedAmount = null;
+  if (balance != null && isFinite(balance) && balance > 0) {
+    sizedAmount = balance * scaledF;
+  }
+
+  return {
+    side: side,
+    fraction: scaledF,
+    sizedAmount: sizedAmount,
+    evPerDollar: evPerDollar,
+  };
+}
+
+function updateSizingUI(result, balance) {
+  if (!els.kellySide || !els.kellyFraction || !els.kellySize || !els.kellyEv) return;
+
+  if (!result) {
+    els.kellySide.textContent = "—";
+    els.kellyFraction.textContent = "—";
+    els.kellySize.textContent = "—";
+    els.kellyEv.textContent = "—";
+    return;
+  }
+
+  if (!result.side || result.fraction <= 0 || !isFinite(result.fraction)) {
+    els.kellySide.textContent = "No +EV";
+    els.kellyFraction.textContent = "—";
+    els.kellySize.textContent = balance && balance > 0 ? "$0.00" : "—";
+    els.kellyEv.textContent = "≤ 0¢";
+    return;
+  }
+
+  els.kellySide.textContent = result.side;
+  els.kellyFraction.textContent = formatPct(result.fraction);
+
+  if (result.sizedAmount != null && isFinite(result.sizedAmount)) {
+    els.kellySize.textContent = formatUsd(result.sizedAmount);
+  } else {
+    els.kellySize.textContent = "Enter balance";
+  }
+
+  var cents = Math.round(result.evPerDollar * 100);
+  var sign = cents >= 0 ? "+" : "";
+  els.kellyEv.textContent = sign + cents + "¢";
+}
+
+function initSizing(balanceFromCtx, edge) {
+  if (!els.balanceInput) return;
+
+  loadStoredBalance(function (stored) {
+    var initial = null;
+    if (typeof balanceFromCtx === "number" && balanceFromCtx > 0) {
+      initial = balanceFromCtx;
+    } else if (typeof stored === "number" && stored > 0) {
+      initial = stored;
+    }
+
+    if (initial != null) {
+      els.balanceInput.value = String(initial.toFixed(2));
+    }
+
+    var balanceVal = initial;
+    var pSynth = edge.synth_probability_up != null ? edge.synth_probability_up : edge.synth_probability;
+    var pMarket = edge.polymarket_probability_up != null ? edge.polymarket_probability_up : null;
+    var conf = edge.confidence_score != null ? edge.confidence_score : 0.5;
+    var sizing = computeKellySizing({
+      pSynth: pSynth,
+      pMarket: pMarket,
+      confidence: conf,
+      balance: balanceVal,
+    });
+    updateSizingUI(sizing, balanceVal);
+  });
+
+  els.balanceInput.addEventListener("change", function () {
+    var v = parseFloat(els.balanceInput.value);
+    if (isNaN(v) || v < 0) {
+      updateSizingUI(null, null);
+      return;
+    }
+    saveStoredBalance(v);
+
+    var pSynth = edge.synth_probability_up != null ? edge.synth_probability_up : edge.synth_probability;
+    var pMarket = edge.polymarket_probability_up != null ? edge.polymarket_probability_up : null;
+    var conf = edge.confidence_score != null ? edge.confidence_score : 0.5;
+    var sizing = computeKellySizing({
+      pSynth: pSynth,
+      pMarket: pMarket,
+      confidence: conf,
+      balance: v,
+    });
+    updateSizingUI(sizing, v);
+  });
+}
 
 // Calculate edge percentage from Synth and Polymarket probabilities
 function calcEdgePct(synthProb, polyProb) {
@@ -280,6 +476,9 @@ async function refresh() {
     confText: (conf >= 0.7 ? "High" : conf >= 0.4 ? "Medium" : "Low") + " (" + confPct + "%)",
     lastUpdate: fmtApiTime(edge.current_time),
   });
+
+  // Initialize Kelly sizing panel
+  initSizing(ctx.balance, edge);
   
   // Reset and start poll progress animation
   startPollProgress();

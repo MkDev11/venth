@@ -1,11 +1,12 @@
-# Synth Overlay — Polymarket Edge Extension
+# Synth Overlay — Polymarket Edge & Position Sizing Extension
 
-Chrome extension that uses Chrome's **native Side Panel** to show Synth market context on Polymarket. The panel is data-first: Synth Up/Down prices, edge, confidence, signal explanation, and invalidation conditions.
+Chrome extension that uses Chrome's **native Side Panel** to show Synth market context on Polymarket and convert that edge into a **concrete position size**. The panel is data-first: Synth Up/Down prices, edge, confidence, signal explanation, invalidation conditions, and a **Kelly-based position sizing calculator**.
 
 ## What it does
 
 - **Native Side Panel**: Uses Chrome Side Panel API (`chrome.sidePanel`) instead of an in-page floating overlay.
-- **Data-focused UI**: Shows Synth Up/Down prices, YES edge, confidence, explanation, and what would invalidate the signal.
+- **Data-focused edge UI**: Shows Synth Up/Down prices, YES edge, confidence, explanation, and what would invalidate the signal.
+- **Balance-aware position sizing**: Reads (or lets the user set) wallet/account balance and recommends a **Kelly-optimal position size** based on Synth vs Polymarket probabilities and forecast confidence.
 - **Synth-sourced prices only**: Displays prices from the Synth API to avoid sync issues with DOM-scraped market data.
 - **Manual + auto refresh**: Refresh button in panel plus automatic 15s refresh. "Data as of" timestamp shows when the Synth data was generated.
 - **Clear confidence colors**: red (&lt;40%), amber (40–70%), green (≥70%).
@@ -13,11 +14,12 @@ Chrome extension that uses Chrome's **native Side Panel** to show Synth market c
 
 ## How it works
 
-1. **Content script** (on `polymarket.com`) reads the market slug from the page URL.
+1. **Content script** (on `polymarket.com`) reads the market slug from the page URL and scrapes **live prices** and **balance** from the DOM.
 2. **Side panel page** requests context from the content script and fetches Synth edge data from local API (`GET /api/edge?slug=...`).
 3. **Panel rendering** displays Synth forecast data (prices, edge, signal, confidence, analysis, invalidation) and updates every 15s or on manual refresh.
-4. **Background service worker** enables/disables side panel per-tab based on URL and runs the alert polling engine.
-5. **Edge alerts** poll watched markets every 60s via `chrome.alarms`. When edge exceeds the user's threshold, a browser notification fires with asset, edge size, signal direction, and confidence. Clicking the notification focuses or opens the relevant Polymarket page. Notifications are suppressed when the user is already viewing the market and have a 5-minute cooldown per market to avoid spam.
+4. **Position Sizing card** combines Synth probabilities, Polymarket-implied odds, forecast confidence, and user balance into a Kelly-based recommendation.
+5. **Background service worker** enables/disables side panel per-tab based on URL and runs the alert polling engine.
+6. **Edge alerts** poll watched markets every 60s via `chrome.alarms`. When edge exceeds the user's threshold, a browser notification fires with asset, edge size, signal direction, and confidence. Clicking the notification focuses or opens the relevant Polymarket page. Notifications are suppressed when the user is already viewing the market and have a 5-minute cooldown per market to avoid spam.
 
 ## Synth API usage
 
@@ -27,6 +29,86 @@ Chrome extension that uses Chrome's **native Side Panel** to show Synth market c
 - `get_polymarket_5min(asset)` — 5-minute up/down (5m).
 - `get_polymarket_range()` — range brackets with synth vs polymarket probability per bracket.
 - `get_prediction_percentiles(asset, horizon)` — used for confidence scoring (forecast spread) and optional bias in explanations.
+
+## Position sizing & Kelly Criterion
+
+The **Position Sizing** card in the side panel answers “how much should I bet?” for a given Polymarket market.
+
+### Balance detection
+
+- The content script (`content.js`) runs on `polymarket.com` and:
+  - Scrapes **wallet / account balance** from compact DOM text such as `Balance 123.45 USDC` or `$123.45`.
+  - Exposes this numeric balance as `balance` in the context returned to the side panel.
+- In the side panel (`sidepanel.html` / `sidepanel.js`):
+  - The **Balance** field is pre-filled with the scraped value when available.
+  - The user can override it manually; the value is persisted in `chrome.storage.local` so it survives reloads.
+
+If no balance can be detected or stored, the user can still enter it by hand and the sizing logic remains the same.
+
+### Inputs used for sizing
+
+For a given up/down market, the side panel uses:
+
+- `p_synth` — Synth probability of **YES** (`synth_probability_up` from `/api/edge`).
+- `p_market` — Polymarket-implied probability of **YES** (from Synth server or live DOM price).
+- `confidence_score` — forecast confidence from `EdgeAnalyzer` in \[0, 1].
+- `balance` — user bankroll in USD/USDC (scraped or user-entered).
+
+### Expected value per \$1
+
+Assuming a binary payoff (cost = `p_market`, payout = 1 on success), the expected value per \$1 wager is:
+
+- YES side: \(\mathrm{EV}_{\text{YES}} = p_{\text{synth}} - p_{\text{market}}\)
+- NO side:  \(\mathrm{EV}_{\text{NO}} = (1 - p_{\text{synth}}) - (1 - p_{\text{market}})\)
+
+The side with **positive EV** and positive Kelly fraction is preferred; if neither side has positive EV, the UI clearly shows **“No +EV”** and the recommended size is \$0.
+
+### Kelly fraction
+
+For each side, we compute the **Kelly fraction**:
+
+- Market-implied odds:  
+  \[
+  b = \frac{1 - p_{\text{market}}}{p_{\text{market}}}
+  \]
+- True edge (per Kelly):  
+  \[
+  f^* = \frac{b \cdot p_{\text{true}} - (1 - p_{\text{true}})}{b}
+  \]
+
+Where:
+
+- For YES, \(p_{\text{true}} = p_{\text{synth}}\), \(p_{\text{market}} = p_{\text{market}}\).
+- For NO, \(p_{\text{true}} = 1 - p_{\text{synth}}\), \(p_{\text{market}} = 1 - p_{\text{market}}\).
+
+The extension computes `f_yes` and `f_no`, discards non-positive or non-finite values, and chooses the side with:
+
+- Positive expected value, and
+- Positive Kelly fraction.
+
+### Confidence scaling and risk cap
+
+To keep sizing realistic and robust to noisy forecasts:
+
+- The raw Kelly fraction is **scaled by forecast confidence**:
+  \[
+  f_{\text{scaled}} = \mathrm{clamp}(f^* \cdot \text{confidence\_score}, 0, f_{\max})
+  \]
+- `confidence_score` comes from `EdgeAnalyzer.compute_confidence` and reflects forecast distribution width across 1h/24h horizons.
+- `f_max` is a hard **cap of 20%** of bankroll (0.2) to avoid extreme sizing even when edge appears very large.
+
+The final recommended position size is then:
+
+\[
+\text{size} = \text{balance} \times f_{\text{scaled}}
+\]
+
+The UI shows:
+
+- **Kelly Side**: `YES`, `NO`, or `No +EV`.
+- **Kelly Fraction**: `f_scaled` as a percentage of balance.
+- **Size**: \(\text{balance} \times f_{\text{scaled}}\) in USD.
+- **EV per \$**: \(\mathrm{EV}_{\text{YES}}\) or \(\mathrm{EV}_{\text{NO}}\) in cents.
 
 ## Run locally
 
