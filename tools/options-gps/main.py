@@ -32,6 +32,15 @@ from pipeline import (
     PERCENTILE_LABELS,
 )
 
+from exchange import (
+    fetch_all_exchanges,
+    strategy_divergence as _strat_div,
+    leg_divergences,
+    best_market_price,
+    compute_divergence,
+    compute_edge,
+)
+
 SUPPORTED_ASSETS = ["BTC", "ETH", "SOL", "XAU", "SPY", "NVDA", "TSLA", "AAPL", "GOOGL"]
 
 
@@ -184,11 +193,113 @@ def screen_view_setup(preset_symbol: str | None = None, preset_view: str | None 
     return symbol, view, risk
 
 
+def _line_shopping_side(exchange_quotes, deribit_quotes, aevo_quotes, opts, strike, opt_type):
+    """Build data for one side (call or put) of a strike row.
+    Returns all original columns: fair, deribit_mid, aevo_mid, execute_venue, execute_price, edge, marker."""
+    sk = str(int(strike)) if strike == int(strike) else str(strike)
+    fair = float(opts.get(sk, 0))
+    if fair <= 0.01:
+        return None
+    best_deribit = best_market_price(deribit_quotes, strike, opt_type)
+    best_aevo = best_market_price(aevo_quotes, strike, opt_type)
+    edge = compute_edge(fair, exchange_quotes, strike, opt_type)
+    best = best_market_price(exchange_quotes, strike, opt_type)
+    return {
+        "fair": fair,
+        "deribit_mid": best_deribit.mid if best_deribit else None,
+        "aevo_mid": best_aevo.mid if best_aevo else None,
+        "exec_venue": best.exchange.upper()[:3] if best else None,
+        "exec_ask": best.ask if best else None,
+        "z_score": edge.z_score if edge else None,
+    }
+
+
+def _fmt_price(val, width=7):
+    """Format a price value or --- if None."""
+    if val is None:
+        return f"{'---':>{width}s}"
+    return f"{val:>{width},.0f}"
+
+
+# Column widths for line shopping table (per side)
+_W = {"synth": 7, "der": 6, "aev": 6, "exec": 9, "edge": 6}
+# Side = synth + sp + der + sp + aev + 2sp + exec + sp + edge
+_SIDE_W = _W["synth"] + 1 + _W["der"] + 1 + _W["aev"] + 2 + _W["exec"] + 1 + _W["edge"]
+
+
+def _fmt_side(side):
+    """Format one side (call or put) of a strike row with all columns."""
+    dash = lambda w: f"{'---':>{w}s}"
+    if side is None:
+        return f"{dash(_W['synth'])} {dash(_W['der'])} {dash(_W['aev'])}  {dash(_W['exec'])} {dash(_W['edge'])}"
+    fair_s = _fmt_price(side["fair"], _W["synth"])
+    der_s = _fmt_price(side["deribit_mid"], _W["der"])
+    aev_s = _fmt_price(side["aevo_mid"], _W["aev"])
+    if side["exec_venue"]:
+        venue = "DER" if side["exec_venue"].startswith("DER") else "AEV"
+        exec_s = f"{venue} {side['exec_ask']:>{_W['exec'] - 4},.0f}"
+    else:
+        exec_s = dash(_W["exec"])
+    if side["z_score"] is not None:
+        raw = f"{side['z_score']:+.1f}\u03c3"
+        edge_s = f"{raw:>{_W['edge']}s}"
+    else:
+        edge_s = dash(_W["edge"])
+    return f"{fair_s} {der_s} {aev_s}  {exec_s} {edge_s}"
+
+
+def _print_line_shopping_table(exchange_quotes: list, synth_options: dict, current_price: float):
+    """Display Market Line Shopping table with statistical edge detection.
+    Call and put shown side-by-side per strike with all columns:
+    Synth Fair, Deribit mid, Aevo mid, ★ Execute @ (venue + ask), Edge (z-score)."""
+    call_opts = synth_options.get("call_options", {})
+    put_opts = synth_options.get("put_options", {})
+    all_strikes = sorted(set(float(k) for k in list(call_opts.keys()) + list(put_opts.keys())))
+    if not all_strikes:
+        return
+    # ATM ± 2 strikes
+    atm_idx = min(range(len(all_strikes)), key=lambda i: abs(all_strikes[i] - current_price))
+    start = max(0, atm_idx - 2)
+    end = min(len(all_strikes), atm_idx + 3)
+    nearby = all_strikes[start:end]
+    deribit_quotes = [q for q in exchange_quotes if q.exchange == "deribit"]
+    aevo_quotes = [q for q in exchange_quotes if q.exchange == "aevo"]
+    rows = []
+    for strike in nearby:
+        call_side = _line_shopping_side(exchange_quotes, deribit_quotes, aevo_quotes, call_opts, strike, "call")
+        put_side = _line_shopping_side(exchange_quotes, deribit_quotes, aevo_quotes, put_opts, strike, "put")
+        if not call_side and not put_side:
+            continue
+        rows.append((strike, call_side, put_side))
+    if not rows:
+        return
+    print(f"{BAR}")
+    print(_section("MARKET LINE SHOPPING"))
+    side_hdr = (f"{'Synth':>{_W['synth']}s} {'DER':>{_W['der']}s} {'AEV':>{_W['aev']}s}"
+                f"  {'* Exec':>{_W['exec']}s} {'Edge':>{_W['edge']}s}")
+    strike_col = 8  # width of strike number
+    atm_col = 3     # width of ATM marker
+    sep = " \u2502 "
+    print(f"{BAR}    {'Strike':>{strike_col}s}{'':{atm_col}s} {'CALL':^{_SIDE_W}s}{sep}{'PUT':^{_SIDE_W}s}")
+    print(f"{BAR}    {'':{strike_col}s}{'':{atm_col}s} {side_hdr}{sep}{side_hdr}")
+    w = strike_col + atm_col + 1 + _SIDE_W + len(sep) + _SIDE_W
+    print(f"{BAR}    {SEP * w}")
+    atm_strike = nearby[min(range(len(nearby)), key=lambda i: abs(nearby[i] - current_price))]
+    for strike, call_side, put_side in rows:
+        atm = " \u25c0 " if strike == atm_strike else "   "
+        c_str = _fmt_side(call_side)
+        p_str = _fmt_side(put_side)
+        print(f"{BAR}    {strike:>{strike_col},.0f}{atm} {c_str}{sep}{p_str}")
+    print(f"{BAR}    {SEP * w}")
+    print(f"{BAR}    * Exec = best execution venue ask price (DER=Deribit, AEV=Aevo)")
+
+
 def screen_market_context(symbol: str, current_price: float, confidence: float,
                           fusion_state: str, vol_future: float, vol_realized: float,
                           volatility_high: bool, p1h_last: dict | None, p24h_last: dict | None,
                           no_trade_reason: str | None,
-                          implied_vol: float = 0.0, vol_bias: str | None = None):
+                          implied_vol: float = 0.0, vol_bias: str | None = None,
+                          exchange_quotes: list | None = None, synth_options: dict | None = None):
     """Screen 1b: Market context — shows current conditions before recommendations."""
     print(_header(f"Market Context: {symbol}"))
     print(_kv("Price", f"${current_price:,.2f}"))
@@ -204,6 +315,8 @@ def screen_market_context(symbol: str, current_price: float, confidence: float,
         bias_label = (vol_bias or "").replace("_", " ").upper()
         print(_kv("Implied Vol", f"{implied_vol:.1f}% (from ATM options)"))
         print(_kv("Synth vs IV", f"{iv_ratio:.2f}x \u2192 {bias_label}"))
+    if exchange_quotes and synth_options:
+        _print_line_shopping_table(exchange_quotes, synth_options, current_price)
     print(f"{BAR}")
     if p1h_last:
         p05 = float(p1h_last.get("0.05", 0))
@@ -277,15 +390,25 @@ def _comparison_table(cards: list[tuple[str, ScoredStrategy | None]], current_pr
     return lines
 
 
-def _print_strategy_card(label: str, card: ScoredStrategy, icon: str, current_price: float = 0, asset: str = ""):
+def _print_strategy_card(label: str, card: ScoredStrategy, icon: str, current_price: float = 0, asset: str = "",
+                         leg_divs: dict | None = None):
     s = card.strategy
     ev_pct = (card.expected_value / current_price * 100) if current_price > 0 else 0.0
     print(f"{BAR}")
     print(f"{BAR}  {icon} {label}: {s.description}")
     print(_section("CONSTRUCTION"))
     if s.legs:
-        for leg in s.legs:
+        for i, leg in enumerate(s.legs):
             print(f"{BAR}    {leg.action:<4s} {leg.quantity}x {asset} ${leg.strike:,.0f} {leg.option_type}  @ ${leg.premium:,.2f}")
+            if leg_divs and i in leg_divs:
+                ld = leg_divs[i]
+                z = ld["z_score"]
+                venue = ld["best_exchange"].upper()
+                price = ld["best_price"]
+                action_verb = "Buy" if leg.action == "BUY" else "Sell"
+                price_type = "ask" if leg.action == "BUY" else "bid"
+                edge_marker = " \u25c6" if abs(z) >= 1.0 else ""
+                print(f"{BAR}      \u2605 {action_verb} @ {venue} {price_type} ${price:,.2f} \u2014 edge {z:+.1f}\u03c3{edge_marker}")
         net_label = "Net Credit" if s.cost < 0 else "Net Debit"
         print(f"{BAR}    {net_label}: ${abs(s.cost):,.2f}  |  Expiry: {s.expiry or 'N/A'}")
     print(_section("METRICS"))
@@ -305,7 +428,8 @@ def _print_strategy_card(label: str, card: ScoredStrategy, icon: str, current_pr
 
 
 def screen_top_plays(best: ScoredStrategy | None, safer: ScoredStrategy | None, upside: ScoredStrategy | None,
-                     no_trade_reason: str | None, confidence: float = 0.0, current_price: float = 0, asset: str = ""):
+                     no_trade_reason: str | None, confidence: float = 0.0, current_price: float = 0, asset: str = "",
+                     exchange_quotes: list | None = None, synth_options: dict | None = None):
     """Screen 2: Comparison table + detailed strategy cards."""
     print(_header("Screen 2: Top Plays"))
     if no_trade_reason:
@@ -331,7 +455,12 @@ def screen_top_plays(best: ScoredStrategy | None, safer: ScoredStrategy | None, 
     for label, card, icon in cards:
         if card is None:
             continue
-        _print_strategy_card(label, card, icon, current_price, asset)
+        leg_divs = None
+        if exchange_quotes and synth_options:
+            leg_divs = leg_divergences(card.strategy, exchange_quotes, synth_options)
+            if not leg_divs:
+                leg_divs = None
+        _print_strategy_card(label, card, icon, current_price, asset, leg_divs=leg_divs)
     print(_footer())
 
 
@@ -542,12 +671,12 @@ def screen_if_wrong(best: ScoredStrategy | None, no_trade_reason: str | None,
     print(_footer())
 
 
-def _card_to_log(card: ScoredStrategy | None) -> dict | None:
+def _card_to_log(card: ScoredStrategy | None, exchange_divergence: float | None = None) -> dict | None:
     """Serialize a strategy card for the decision log with full trade construction."""
     if card is None:
         return None
     s = card.strategy
-    return {
+    result = {
         "description": s.description,
         "type": s.strategy_type,
         "legs": [
@@ -565,6 +694,15 @@ def _card_to_log(card: ScoredStrategy | None) -> dict | None:
         "tail_risk": round(card.tail_risk, 2),
         "loss_profile": card.loss_profile,
     }
+    if exchange_divergence is not None:
+        z = exchange_divergence
+        result["exchange_edge_zscore"] = round(z, 2)
+        result["exchange_edge_label"] = (
+            "STRONG" if abs(z) >= 2.0 else
+            "MODERATE" if abs(z) >= 1.0 else
+            "WEAK" if abs(z) >= 0.5 else "NONE"
+        )
+    return result
 
 
 def _parse_screen_arg(screen_arg: str) -> set[int]:
@@ -627,7 +765,19 @@ def main():
     no_trade_reason = should_no_trade(fusion_state, view, volatility_high, confidence, vol_bias=vol_bias)
     candidates = generate_strategies(options, view, risk, asset=symbol, expiry=expiry)
     outcome_prices, cdf_values = _outcome_prices_and_cdf(p24h_last)
-    scored = rank_strategies(candidates, fusion_state, view, outcome_prices, risk, current_price, confidence, vol_ratio, cdf_values=cdf_values, vol_bias=vol_bias) if candidates else []
+    # Load exchange data for crypto assets
+    exchange_quotes = None
+    divergence_by_strategy = None
+    if symbol in ("BTC", "ETH", "SOL"):
+        mock_dir = os.path.join(os.path.dirname(__file__), "..", "..", "mock_data", "exchange_options")
+        exchange_quotes = fetch_all_exchanges(symbol, mock_dir=mock_dir if not os.environ.get("SYNTH_API_KEY") else None)
+        if exchange_quotes and candidates:
+            divergence_by_strategy = {}
+            for c in candidates:
+                div = _strat_div(c, exchange_quotes, options)
+                if div is not None:
+                    divergence_by_strategy[id(c)] = div
+    scored = rank_strategies(candidates, fusion_state, view, outcome_prices, risk, current_price, confidence, vol_ratio, cdf_values=cdf_values, vol_bias=vol_bias, divergence_by_strategy=divergence_by_strategy) if candidates else []
     best, safer, upside = select_three_cards(scored)
     shown_any = 1 in screens
     if shown_any:
@@ -635,11 +785,13 @@ def main():
         screen_market_context(symbol, current_price, confidence, fusion_state,
                               vol_future, vol_realized, volatility_high,
                               p1h_last, p24h_last, no_trade_reason,
-                              implied_vol=implied_vol, vol_bias=vol_bias)
+                              implied_vol=implied_vol, vol_bias=vol_bias,
+                              exchange_quotes=exchange_quotes, synth_options=options)
     if 2 in screens:
         if shown_any:
             _pause("Screen 2: Top Plays", args.no_prompt)
-        screen_top_plays(best, safer, upside, no_trade_reason, confidence, current_price, asset=symbol)
+        screen_top_plays(best, safer, upside, no_trade_reason, confidence, current_price, asset=symbol,
+                         exchange_quotes=exchange_quotes, synth_options=options)
         shown_any = True
     if 3 in screens:
         if shown_any:
@@ -672,9 +824,10 @@ def main():
         "no_trade_reason": no_trade_reason,
         "candidates_generated": len(candidates),
         "candidates_after_filters": len(scored),
-        "best_match": _card_to_log(best),
-        "safer_alt": _card_to_log(safer),
-        "higher_upside": _card_to_log(upside),
+        "exchange_data_available": bool(exchange_quotes),
+        "best_match": _card_to_log(best, divergence_by_strategy.get(id(best.strategy)) if divergence_by_strategy and best else None),
+        "safer_alt": _card_to_log(safer, divergence_by_strategy.get(id(safer.strategy)) if divergence_by_strategy and safer else None),
+        "higher_upside": _card_to_log(upside, divergence_by_strategy.get(id(upside.strategy)) if divergence_by_strategy and upside else None),
     }
     print(_header("Decision Log (JSON)"))
     for line in json.dumps(decision_log, indent=2, ensure_ascii=False).split("\n"):

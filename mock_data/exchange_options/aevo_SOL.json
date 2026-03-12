@@ -1,0 +1,34 @@
+{
+  "markets": [
+    {"instrument_name": "SOL-82-C", "strike": 82, "option_type": "call"},
+    {"instrument_name": "SOL-82-P", "strike": 82, "option_type": "put"},
+    {"instrument_name": "SOL-84-C", "strike": 84, "option_type": "call"},
+    {"instrument_name": "SOL-84-P", "strike": 84, "option_type": "put"},
+    {"instrument_name": "SOL-86-C", "strike": 86, "option_type": "call"},
+    {"instrument_name": "SOL-86-P", "strike": 86, "option_type": "put"},
+    {"instrument_name": "SOL-88-C", "strike": 88, "option_type": "call"},
+    {"instrument_name": "SOL-88-P", "strike": 88, "option_type": "put"},
+    {"instrument_name": "SOL-90-C", "strike": 90, "option_type": "call"},
+    {"instrument_name": "SOL-90-P", "strike": 90, "option_type": "put"},
+    {"instrument_name": "SOL-92-C", "strike": 92, "option_type": "call"},
+    {"instrument_name": "SOL-92-P", "strike": 92, "option_type": "put"},
+    {"instrument_name": "SOL-94-C", "strike": 94, "option_type": "call"},
+    {"instrument_name": "SOL-94-P", "strike": 94, "option_type": "put"}
+  ],
+  "order_books": {
+    "SOL-82-C": {"bids": [[5.30, 50.0, 73.0]], "asks": [[5.50, 40.0, 74.5]]},
+    "SOL-82-P": {"bids": [[0.0035, 80.0, 72.5]], "asks": [[0.0048, 60.0, 74.0]]},
+    "SOL-84-C": {"bids": [[3.30, 40.0, 72.2]], "asks": [[3.52, 30.0, 73.8]]},
+    "SOL-84-P": {"bids": [[0.045, 60.0, 71.8]], "asks": [[0.065, 50.0, 73.5]]},
+    "SOL-86-C": {"bids": [[1.62, 30.0, 71.5]], "asks": [[1.78, 25.0, 73.2]]},
+    "SOL-86-P": {"bids": [[0.32, 40.0, 71.0]], "asks": [[0.40, 30.0, 72.8]]},
+    "SOL-88-C": {"bids": [[0.58, 25.0, 70.8]], "asks": [[0.65, 20.0, 72.5]]},
+    "SOL-88-P": {"bids": [[1.18, 30.0, 70.5]], "asks": [[1.32, 25.0, 72.2]]},
+    "SOL-90-C": {"bids": [[0.14, 20.0, 70.2]], "asks": [[0.18, 15.0, 72.0]]},
+    "SOL-90-P": {"bids": [[2.70, 25.0, 70.0]], "asks": [[2.90, 20.0, 71.8]]},
+    "SOL-92-C": {"bids": [[0.028, 15.0, 69.8]], "asks": [[0.040, 10.0, 71.5]]},
+    "SOL-92-P": {"bids": [[4.55, 20.0, 69.5]], "asks": [[4.80, 15.0, 71.2]]},
+    "SOL-94-C": {"bids": [[0.004, 10.0, 69.2]], "asks": [[0.006, 8.0, 71.0]]},
+    "SOL-94-P": {"bids": [[6.45, 15.0, 69.0]], "asks": [[6.80, 12.0, 70.8]]}
+  }
+}
