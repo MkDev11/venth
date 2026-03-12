@@ -7,8 +7,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from exchanges import (
     compute_divergence,
+    compute_edge_zscores,
+    find_best_venues,
     get_market_lines,
     MockExchangeProvider,
+    LiveDeribitProvider,
+    LiveAevoProvider,
     MarketLineResult,
     _classify_consensus,
     _default_providers,
@@ -148,6 +152,26 @@ def test_mock_provider_positive_prices():
         assert v > 0, f"Put {k} has non-positive price {v}"
 
 
+def test_mock_provider_is_not_live():
+    """Mock providers report is_live=False."""
+    p = MockExchangeProvider("Test", 0, 0, 0, seed=0)
+    assert p.is_live is False
+
+
+# ── Live provider properties ────────────────────────────────────
+
+def test_live_deribit_provider_is_live():
+    p = LiveDeribitProvider("id", "secret")
+    assert p.is_live is True
+    assert p.name == "Deribit"
+
+
+def test_live_aevo_provider_is_live():
+    p = LiveAevoProvider("key")
+    assert p.is_live is True
+    assert p.name == "Aevo"
+
+
 # ── _classify_consensus ────────────────────────────────────────
 
 def test_consensus_classification():
@@ -161,6 +185,117 @@ def test_consensus_classification():
     assert _classify_consensus(50.0) == "disagreement"
 
 
+# ── Z-score edge detection ──────────────────────────────────────
+
+def test_edge_zscores_basic():
+    """Z-scores computed correctly when Synth diverges from exchange mean."""
+    # Two exchanges: one 10% above Synth, one 10% below → mean ≈ Synth, small z
+    ex_high = {
+        "call_options": {k: float(v) * 1.10 for k, v in SYNTH_OPTIONS["call_options"].items()},
+        "put_options": {k: float(v) * 1.10 for k, v in SYNTH_OPTIONS["put_options"].items()},
+    }
+    ex_low = {
+        "call_options": {k: float(v) * 0.90 for k, v in SYNTH_OPTIONS["call_options"].items()},
+        "put_options": {k: float(v) * 0.90 for k, v in SYNTH_OPTIONS["put_options"].items()},
+    }
+    edges = compute_edge_zscores(SYNTH_OPTIONS, {"ExHigh": ex_high, "ExLow": ex_low})
+    assert len(edges) == 12  # 6 calls + 6 puts
+    for e in edges:
+        # Mean of high+low = Synth, so z ≈ 0
+        assert abs(e.z_score) < 0.5
+
+
+def test_edge_zscores_synth_overvalued():
+    """When both exchanges price below Synth, z-scores should be positive."""
+    ex_a = {
+        "call_options": {k: float(v) * 0.80 for k, v in SYNTH_OPTIONS["call_options"].items()},
+        "put_options": {k: float(v) * 0.80 for k, v in SYNTH_OPTIONS["put_options"].items()},
+    }
+    ex_b = {
+        "call_options": {k: float(v) * 0.85 for k, v in SYNTH_OPTIONS["call_options"].items()},
+        "put_options": {k: float(v) * 0.85 for k, v in SYNTH_OPTIONS["put_options"].items()},
+    }
+    edges = compute_edge_zscores(SYNTH_OPTIONS, {"A": ex_a, "B": ex_b})
+    for e in edges:
+        assert e.z_score > 0, f"Expected positive z for overvalued Synth, got {e.z_score}"
+
+
+def test_edge_zscores_needs_two_exchanges():
+    """Single exchange → no z-scores (need at least 2 for stddev)."""
+    ex = {
+        "call_options": dict(SYNTH_OPTIONS["call_options"]),
+        "put_options": dict(SYNTH_OPTIONS["put_options"]),
+    }
+    edges = compute_edge_zscores(SYNTH_OPTIONS, {"Only": ex})
+    assert edges == []
+
+
+def test_edge_zscores_zero_std_uses_pseudo():
+    """When all exchanges agree perfectly, uses pseudo-std (1% of mean)."""
+    ex_a = {
+        "call_options": {"67000": 1000.0},
+        "put_options": {},
+    }
+    ex_b = {
+        "call_options": {"67000": 1000.0},  # identical
+        "put_options": {},
+    }
+    synth = {"current_price": 67000, "call_options": {"67000": 950.0}, "put_options": {}}
+    edges = compute_edge_zscores(synth, {"A": ex_a, "B": ex_b})
+    assert len(edges) == 1
+    # std = 0 → pseudo_std = 1000 * 0.01 = 10, z = (950 - 1000) / 10 = -5.0
+    assert abs(edges[0].z_score - (-5.0)) < 0.01
+
+
+# ── Best venue identification ───────────────────────────────────
+
+def test_best_venue_buy_cheapest():
+    """For BUY, the exchange with the lowest price wins."""
+    ex_prices = {
+        "Aevo": {"call_options": {"67500": 650.0}, "put_options": {}},
+        "Deribit": {"call_options": {"67500": 620.0}, "put_options": {}},
+    }
+    legs = [{"action": "BUY", "strike": 67500, "option_type": "Call"}]
+    venues = find_best_venues(SYNTH_OPTIONS, ex_prices, legs)
+    assert len(venues) == 1
+    assert venues[0].best_exchange == "Deribit"
+    assert venues[0].best_price == 620.0
+
+
+def test_best_venue_sell_highest():
+    """For SELL, the exchange with the highest price wins."""
+    ex_prices = {
+        "Aevo": {"put_options": {"68000": 530.0}, "call_options": {}},
+        "Deribit": {"put_options": {"68000": 510.0}, "call_options": {}},
+    }
+    legs = [{"action": "SELL", "strike": 68000, "option_type": "Put"}]
+    venues = find_best_venues(SYNTH_OPTIONS, ex_prices, legs)
+    assert len(venues) == 1
+    assert venues[0].best_exchange == "Aevo"
+    assert venues[0].best_price == 530.0
+
+
+def test_best_venue_savings_positive_when_better():
+    """Savings > 0 when best venue price beats Synth."""
+    ex_prices = {
+        "Aevo": {"call_options": {"67500": 600.0}, "put_options": {}},
+        "Deribit": {"call_options": {"67500": 610.0}, "put_options": {}},
+    }
+    legs = [{"action": "BUY", "strike": 67500, "option_type": "Call"}]
+    venues = find_best_venues(SYNTH_OPTIONS, ex_prices, legs)
+    assert len(venues) == 1
+    # Synth call 67500 = 640, best = 600 → savings = 640 - 600 = 40
+    assert venues[0].savings_vs_synth == 40.0
+
+
+def test_best_venue_no_legs_returns_empty():
+    """No strategy legs → no best venues."""
+    venues = find_best_venues(SYNTH_OPTIONS, {}, [])
+    assert venues == []
+    venues2 = find_best_venues(SYNTH_OPTIONS, {}, None)
+    assert venues2 == []
+
+
 # ── get_market_lines ────────────────────────────────────────────
 
 def test_market_lines_default_providers():
@@ -171,6 +306,10 @@ def test_market_lines_default_providers():
     assert result.avg_divergence > 0
     assert result.max_divergence >= result.avg_divergence
     assert result.consensus in ("strong_agreement", "moderate_agreement", "weak_agreement", "disagreement")
+    assert result.data_source == "mock"
+    assert result.edge_score >= 0
+    assert len(result.strike_edges) > 0
+    assert len(result.exchange_prices) == 3
     for s in result.summaries:
         assert s.n_strikes == 12
         assert s.avg_abs_div >= 0
@@ -198,6 +337,7 @@ def test_market_lines_failing_provider():
     """A provider that raises should be skipped, not crash the pipeline."""
     class BrokenProvider:
         name = "Broken"
+        is_live = False
         def get_option_prices(self, asset, synth_options):
             raise ConnectionError("simulated failure")
     good = MockExchangeProvider("Good", 0.0, 0.0, 0.01, seed=1)
@@ -206,63 +346,85 @@ def test_market_lines_failing_provider():
     assert result.summaries[0].exchange == "Good"
 
 
-# ── adjust_confidence_for_divergence ────────────────────────────
-
-def test_confidence_nudge_strong_agreement():
-    base = 0.7
-    adjusted = adjust_confidence_for_divergence(base, 2.0, "strong_agreement")
-    assert adjusted == 0.75
-
-
-def test_confidence_nudge_moderate_agreement():
-    base = 0.7
-    adjusted = adjust_confidence_for_divergence(base, 5.0, "moderate_agreement")
-    assert adjusted == 0.7  # no change
-
-
-def test_confidence_nudge_weak_agreement():
-    base = 0.7
-    adjusted = adjust_confidence_for_divergence(base, 10.0, "weak_agreement")
-    assert abs(adjusted - 0.67) < 1e-9
+def test_market_lines_live_failure_sets_partial():
+    """A live provider that fails sets data_source to 'partial'."""
+    class FailingLive:
+        name = "FailLive"
+        is_live = True
+        def get_option_prices(self, asset, synth_options):
+            raise ConnectionError("network down")
+    good = MockExchangeProvider("Good", 0.0, 0.0, 0.01, seed=1)
+    result = get_market_lines(SYNTH_OPTIONS, providers=[FailingLive(), good])
+    assert result.data_source == "partial"
+    assert len(result.summaries) == 1
 
 
-def test_confidence_nudge_disagreement():
-    base = 0.7
-    adjusted = adjust_confidence_for_divergence(base, 20.0, "disagreement")
-    assert abs(adjusted - 0.63) < 1e-9
+# ── adjust_confidence_for_divergence (edge-based) ───────────────
+
+def test_confidence_strong_edge():
+    """edge_score >= 2.0 → +0.10 (strong alpha signal)."""
+    adjusted = adjust_confidence_for_divergence(0.5, 2.5, "disagreement")
+    assert abs(adjusted - 0.60) < 1e-9
 
 
-def test_confidence_nudge_capped_at_one():
-    adjusted = adjust_confidence_for_divergence(0.98, 1.0, "strong_agreement")
+def test_confidence_moderate_edge():
+    """edge_score >= 1.0 → +0.06."""
+    adjusted = adjust_confidence_for_divergence(0.5, 1.5, "weak_agreement")
+    assert abs(adjusted - 0.56) < 1e-9
+
+
+def test_confidence_mild_edge():
+    """edge_score >= 0.5 → +0.03."""
+    adjusted = adjust_confidence_for_divergence(0.5, 0.7, "moderate_agreement")
+    assert abs(adjusted - 0.53) < 1e-9
+
+
+def test_confidence_no_edge():
+    """edge_score < 0.5 → -0.02 (agreement, no alpha)."""
+    adjusted = adjust_confidence_for_divergence(0.5, 0.3, "strong_agreement")
+    assert abs(adjusted - 0.48) < 1e-9
+
+
+def test_confidence_capped_at_one():
+    adjusted = adjust_confidence_for_divergence(0.95, 2.5, "disagreement")
     assert adjusted == 1.0
 
 
-def test_confidence_nudge_floored_at_point_one():
-    adjusted = adjust_confidence_for_divergence(0.12, 25.0, "disagreement")
+def test_confidence_floored_at_point_one():
+    adjusted = adjust_confidence_for_divergence(0.11, 0.2, "strong_agreement")
     assert adjusted == 0.1
 
 
-def test_confidence_nudge_zero_divergence():
-    """Zero divergence means no adjustment."""
-    base = 0.6
-    adjusted = adjust_confidence_for_divergence(base, 0.0, "strong_agreement")
+def test_confidence_zero_edge_no_change():
+    """Zero edge_score means no adjustment."""
+    adjusted = adjust_confidence_for_divergence(0.6, 0.0, "strong_agreement")
     assert adjusted == 0.6
 
 
-# ── End-to-end: line shopping + confidence integration ──────────
+# ── End-to-end integration ──────────────────────────────────────
 
 def test_end_to_end_line_shopping_adjusts_confidence():
-    """Full flow: Synth data -> market lines -> confidence adjustment."""
+    """Full flow: Synth data -> market lines -> edge-based confidence adjustment."""
     base_confidence = forecast_confidence(P24H, 67723.0)
     market = get_market_lines(SYNTH_OPTIONS, asset="BTC")
-    adjusted = adjust_confidence_for_divergence(base_confidence, market.avg_divergence, market.consensus)
-    # Mock providers produce small divergence -> confidence should shift slightly
-    assert abs(adjusted - base_confidence) <= 0.07
+    adjusted = adjust_confidence_for_divergence(base_confidence, market.edge_score, market.consensus)
+    # Mock providers produce some divergence -> confidence should shift
+    assert abs(adjusted - base_confidence) <= 0.12
     assert 0.1 <= adjusted <= 1.0
 
 
 def test_default_providers_count():
-    providers = _default_providers()
+    providers, data_source = _default_providers()
     assert len(providers) == 3
+    assert data_source == "mock"
     names = {p.name for p in providers}
     assert names == {"Aevo", "Deribit", "OKX"}
+
+
+def test_market_lines_stores_exchange_prices():
+    """exchange_prices dict is stored on the result for downstream use."""
+    result = get_market_lines(SYNTH_OPTIONS, asset="BTC")
+    assert len(result.exchange_prices) == 3
+    for name, prices in result.exchange_prices.items():
+        assert "call_options" in prices
+        assert "put_options" in prices

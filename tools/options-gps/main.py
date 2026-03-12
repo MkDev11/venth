@@ -31,7 +31,7 @@ from pipeline import (
     PERCENTILE_KEYS,
     PERCENTILE_LABELS,
 )
-from exchanges import get_market_lines, MarketLineResult
+from exchanges import get_market_lines, find_best_venues, MarketLineResult
 
 SUPPORTED_ASSETS = ["BTC", "ETH", "SOL", "XAU", "SPY", "NVDA", "TSLA", "AAPL", "GOOGL"]
 
@@ -209,8 +209,21 @@ def screen_market_context(symbol: str, current_price: float, confidence: float,
     if market_lines and market_lines.summaries:
         print(f"{BAR}")
         print(_section("MARKET LINE SHOPPING"))
+        src_label = market_lines.data_source.upper()
         consensus_label = market_lines.consensus.replace('_', ' ').upper()
+        print(f"{BAR}    Source    : {src_label}")
         print(f"{BAR}    Consensus : {consensus_label} (avg |\u0394| {market_lines.avg_divergence:.1f}pp)")
+        # Edge score — alpha is in disagreement
+        edge = market_lines.edge_score
+        if edge >= 2.0:
+            edge_label = "STRONG EDGE"
+        elif edge >= 1.0:
+            edge_label = "MODERATE EDGE"
+        elif edge >= 0.5:
+            edge_label = "MILD EDGE"
+        else:
+            edge_label = "NO EDGE"
+        print(f"{BAR}    Edge      : z={edge:.2f}\u03c3 \u2192 {edge_label}")
         for s in market_lines.summaries:
             call_sign = '+' if s.rich_calls >= 0 else ''
             put_sign = '+' if s.rich_puts >= 0 else ''
@@ -317,7 +330,8 @@ def _print_strategy_card(label: str, card: ScoredStrategy, icon: str, current_pr
 
 
 def screen_top_plays(best: ScoredStrategy | None, safer: ScoredStrategy | None, upside: ScoredStrategy | None,
-                     no_trade_reason: str | None, confidence: float = 0.0, current_price: float = 0, asset: str = ""):
+                     no_trade_reason: str | None, confidence: float = 0.0, current_price: float = 0, asset: str = "",
+                     best_venues: list | None = None):
     """Screen 2: Comparison table + detailed strategy cards."""
     print(_header("Screen 2: Top Plays"))
     if no_trade_reason:
@@ -344,6 +358,17 @@ def screen_top_plays(best: ScoredStrategy | None, safer: ScoredStrategy | None, 
         if card is None:
             continue
         _print_strategy_card(label, card, icon, current_price, asset)
+    if best_venues:
+        print(f"{BAR}")
+        print(_section("BEST EXECUTION VENUE"))
+        for v in best_venues:
+            arrow = "\u2192"
+            save_label = f"save ${v.savings_vs_synth:,.2f}" if v.savings_vs_synth > 0 else "no saving"
+            print(f"{BAR}    {v.action} {v.option_type} ${v.strike:,.0f}  {arrow}  "
+                  f"\u2605 {v.best_exchange} @ ${v.best_price:,.2f} ({save_label})")
+            others = [f"{ex}: ${p:,.2f}" for ex, p in v.all_prices.items() if ex != v.best_exchange]
+            if others:
+                print(f"{BAR}      vs {', '.join(others)}")
     print(_footer())
 
 
@@ -635,7 +660,7 @@ def main():
     vol_ratio = (vol_future / vol_realized) if vol_realized > 0 else 1.0
     confidence = forecast_confidence(p24h_last, current_price)
     market_lines = get_market_lines(options, asset=symbol)
-    confidence = adjust_confidence_for_divergence(confidence, market_lines.avg_divergence, market_lines.consensus)
+    confidence = adjust_confidence_for_divergence(confidence, market_lines.edge_score, market_lines.consensus)
     implied_vol = estimate_implied_vol(options) if view == "vol" else 0.0
     vol_bias = compare_volatility(vol_future, implied_vol) if view == "vol" else None
     no_trade_reason = should_no_trade(fusion_state, view, volatility_high, confidence, vol_bias=vol_bias)
@@ -643,6 +668,11 @@ def main():
     outcome_prices, cdf_values = _outcome_prices_and_cdf(p24h_last)
     scored = rank_strategies(candidates, fusion_state, view, outcome_prices, risk, current_price, confidence, vol_ratio, cdf_values=cdf_values, vol_bias=vol_bias) if candidates else []
     best, safer, upside = select_three_cards(scored)
+    # Compute best execution venues for the selected strategy's legs
+    if best and best.strategy.legs and market_lines.exchange_prices:
+        market_lines.best_venues = find_best_venues(
+            options, market_lines.exchange_prices, best.strategy.legs,
+        )
     shown_any = 1 in screens
     if shown_any:
         _pause("Market Context", args.no_prompt)
@@ -654,7 +684,8 @@ def main():
     if 2 in screens:
         if shown_any:
             _pause("Screen 2: Top Plays", args.no_prompt)
-        screen_top_plays(best, safer, upside, no_trade_reason, confidence, current_price, asset=symbol)
+        screen_top_plays(best, safer, upside, no_trade_reason, confidence, current_price,
+                         asset=symbol, best_venues=market_lines.best_venues)
         shown_any = True
     if 3 in screens:
         if shown_any:
@@ -686,14 +717,23 @@ def main():
         "no_trade": no_trade_reason is not None,
         "no_trade_reason": no_trade_reason,
         "market_lines": {
+            "data_source": market_lines.data_source,
             "consensus": market_lines.consensus,
             "avg_divergence": market_lines.avg_divergence,
             "max_divergence": market_lines.max_divergence,
+            "edge_score": market_lines.edge_score,
             "exchanges": [
                 {"exchange": s.exchange, "avg_abs_div": s.avg_abs_div,
                  "max_abs_div": s.max_abs_div, "rich_calls": s.rich_calls,
                  "rich_puts": s.rich_puts}
                 for s in market_lines.summaries
+            ],
+            "best_venues": [
+                {"action": v.action, "option_type": v.option_type,
+                 "strike": v.strike, "best_exchange": v.best_exchange,
+                 "best_price": v.best_price, "synth_price": v.synth_price,
+                 "savings": v.savings_vs_synth}
+                for v in market_lines.best_venues
             ],
         },
         "candidates_generated": len(candidates),

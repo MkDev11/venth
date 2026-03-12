@@ -30,14 +30,30 @@ Turn a trader's view into one clear options decision. Inputs: **symbol**, **mark
 
 ## Market Line Shopping
 
-Compares Synth's theoretical option prices against multiple exchanges to identify divergence — like a sports bettor "shopping for lines" to find an edge. Displayed on the Market Context screen (Screen 1b) and used to adjust the Confidence metric.
+Compares Synth's theoretical option prices against real exchange prices to identify divergence and exploitable edges — like a sports bettor "shopping for lines."
 
-- **Exchanges:** Aevo, Deribit, OKX (mock providers by default; real adapters can be plugged in).
-- **Divergence metrics per exchange:** avg |Δ| (average absolute %), max |Δ|, signed call/put divergence vs Synth.
-- **Consensus classification:** Strong Agreement (<3%), Moderate (3–7%), Weak (7–15%), Disagreement (>15%).
-- **Confidence adjustment:** Strong agreement nudges confidence up (+0.05); disagreement nudges it down (−0.07). This is a contextual overlay, not a hard guardrail.
+### Three modes of operation
 
-To enable real exchange adapters (future), set the following environment variables:
+- **LIVE** — when exchange API keys are present, fetches real-time mark prices from Aevo and Deribit public REST APIs.
+- **PARTIAL** — some live providers succeeded, some fell back to mock.
+- **MOCK** — no API keys configured; uses mock providers with realistic exchange-specific biases. Safe for contributors and CI.
+
+### Edge detection (alpha over agreement)
+
+Alpha is found in *disagreement*, not consensus. When Synth's price diverges from the market mean, it signals a potential exploitable edge. This is quantified statistically:
+
+- **Z-score:** `z = (synth_price - market_mean) / market_stddev` per strike.
+- **Edge score:** Average |z| across all strikes. Higher = more alpha.
+- **Confidence adjustment:** Strong edge (z≥2σ) boosts confidence +0.10; moderate (z≥1σ) +0.06; mild (z≥0.5σ) +0.03; no edge (<0.5σ) reduces −0.02.
+
+### Best execution venue
+
+After strategy selection, identifies which exchange offers the best execution price per leg:
+- **BUY legs:** lowest exchange price wins.
+- **SELL legs:** highest exchange price wins.
+- Displayed on Screen 2 with savings vs Synth price and per-exchange comparison.
+
+### Exchange configuration
 
 ```
 AEVO_API_KEY=...
@@ -45,7 +61,7 @@ DERIBIT_CLIENT_ID=...
 DERIBIT_CLIENT_SECRET=...
 ```
 
-When these are unset, Options GPS uses mock providers that perturb Synth prices with realistic exchange-specific biases. This is safe for contributors and CI.
+When these are unset, Options GPS uses mock providers. When set, `LiveDeribitProvider` calls `public/get_book_summary_by_currency` and `LiveAevoProvider` calls `GET /markets` to fetch real-time option mark prices.
 
 ## Synth API usage
 

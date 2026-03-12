@@ -808,22 +808,29 @@ def forecast_confidence(percentiles_last: dict, current_price: float) -> float:
     return max(0.1, 1.0 - (spread - 0.02) / 0.13)
 
 
-def adjust_confidence_for_divergence(base_confidence: float, avg_divergence: float,
+def adjust_confidence_for_divergence(base_confidence: float, edge_score: float,
                                      consensus: str) -> float:
-    """Adjust forecast confidence based on multi-exchange divergence.
-    Strong agreement with Synth nudges confidence up; large disagreement nudges it down.
-    The adjustment is intentionally small — line shopping is a contextual overlay,
-    not a hard guardrail."""
-    if avg_divergence <= 0:
+    """Adjust forecast confidence based on Synth's statistical edge vs market.
+
+    Alpha is found in *disagreement*: when Synth's theoretical prices diverge
+    from the exchange consensus (high z-score), it signals a potential exploitable
+    edge → higher conviction.  Agreement means no edge → mild reduction.
+
+    edge_score is the average |z-score| across all strikes.
+    """
+    if edge_score <= 0:
         return base_confidence
-    if consensus == "strong_agreement":
-        return min(1.0, base_confidence + 0.05)
-    if consensus == "moderate_agreement":
-        return base_confidence
-    if consensus == "weak_agreement":
-        return max(0.1, base_confidence - 0.03)
-    # disagreement
-    return max(0.1, base_confidence - 0.07)
+    if edge_score >= 2.0:
+        # Strong edge: Synth diverges >2σ from market — high conviction
+        return min(1.0, base_confidence + 0.10)
+    if edge_score >= 1.0:
+        # Moderate edge: meaningful divergence
+        return min(1.0, base_confidence + 0.06)
+    if edge_score >= 0.5:
+        # Mild edge: slight divergence worth noting
+        return min(1.0, base_confidence + 0.03)
+    # edge_score < 0.5: Synth and market agree — no exploitable edge
+    return max(0.1, base_confidence - 0.02)
 
 
 def is_volatility_elevated(forecast_vol: float, realized_vol: float) -> bool:
