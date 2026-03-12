@@ -193,9 +193,65 @@ def screen_view_setup(preset_symbol: str | None = None, preset_view: str | None 
     return symbol, view, risk
 
 
+def _line_shopping_side(exchange_quotes, deribit_quotes, aevo_quotes, opts, strike, opt_type):
+    """Build data for one side (call or put) of a strike row.
+    Returns all original columns: fair, deribit_mid, aevo_mid, execute_venue, execute_price, edge, marker."""
+    sk = str(int(strike)) if strike == int(strike) else str(strike)
+    fair = float(opts.get(sk, 0))
+    if fair <= 0.01:
+        return None
+    best_deribit = best_market_price(deribit_quotes, strike, opt_type)
+    best_aevo = best_market_price(aevo_quotes, strike, opt_type)
+    edge = compute_edge(fair, exchange_quotes, strike, opt_type)
+    best = best_market_price(exchange_quotes, strike, opt_type)
+    return {
+        "fair": fair,
+        "deribit_mid": best_deribit.mid if best_deribit else None,
+        "aevo_mid": best_aevo.mid if best_aevo else None,
+        "exec_venue": best.exchange.upper()[:3] if best else None,
+        "exec_ask": best.ask if best else None,
+        "z_score": edge.z_score if edge else None,
+    }
+
+
+def _fmt_price(val, width=7):
+    """Format a price value or --- if None."""
+    if val is None:
+        return f"{'---':>{width}s}"
+    return f"{val:>{width},.0f}"
+
+
+# Column widths for line shopping table (per side)
+_W = {"synth": 7, "der": 6, "aev": 6, "exec": 9, "edge": 6}
+# Side = synth + sp + der + sp + aev + 2sp + exec + sp + edge
+_SIDE_W = _W["synth"] + 1 + _W["der"] + 1 + _W["aev"] + 2 + _W["exec"] + 1 + _W["edge"]
+
+
+def _fmt_side(side):
+    """Format one side (call or put) of a strike row with all columns."""
+    dash = lambda w: f"{'---':>{w}s}"
+    if side is None:
+        return f"{dash(_W['synth'])} {dash(_W['der'])} {dash(_W['aev'])}  {dash(_W['exec'])} {dash(_W['edge'])}"
+    fair_s = _fmt_price(side["fair"], _W["synth"])
+    der_s = _fmt_price(side["deribit_mid"], _W["der"])
+    aev_s = _fmt_price(side["aevo_mid"], _W["aev"])
+    if side["exec_venue"]:
+        venue = "DER" if side["exec_venue"].startswith("DER") else "AEV"
+        exec_s = f"{venue} {side['exec_ask']:>{_W['exec'] - 4},.0f}"
+    else:
+        exec_s = dash(_W["exec"])
+    if side["z_score"] is not None:
+        raw = f"{side['z_score']:+.1f}\u03c3"
+        edge_s = f"{raw:>{_W['edge']}s}"
+    else:
+        edge_s = dash(_W["edge"])
+    return f"{fair_s} {der_s} {aev_s}  {exec_s} {edge_s}"
+
+
 def _print_line_shopping_table(exchange_quotes: list, synth_options: dict, current_price: float):
     """Display Market Line Shopping table with statistical edge detection.
-    Highlights best execution venue per strike and z-score conviction level."""
+    Call and put shown side-by-side per strike with all columns:
+    Synth Fair, Deribit mid, Aevo mid, ★ Execute @ (venue + ask), Edge (z-score)."""
     call_opts = synth_options.get("call_options", {})
     put_opts = synth_options.get("put_options", {})
     all_strikes = sorted(set(float(k) for k in list(call_opts.keys()) + list(put_opts.keys())))
@@ -209,44 +265,33 @@ def _print_line_shopping_table(exchange_quotes: list, synth_options: dict, curre
     deribit_quotes = [q for q in exchange_quotes if q.exchange == "deribit"]
     aevo_quotes = [q for q in exchange_quotes if q.exchange == "aevo"]
     rows = []
-    has_edge = False
     for strike in nearby:
-        for opt_type in ("call", "put"):
-            sk = str(int(strike)) if strike == int(strike) else str(strike)
-            fair = float(call_opts.get(sk, 0)) if opt_type == "call" else float(put_opts.get(sk, 0))
-            if fair <= 0.01:
-                continue
-            best_deribit = best_market_price(deribit_quotes, strike, opt_type)
-            best_aevo = best_market_price(aevo_quotes, strike, opt_type)
-            edge = compute_edge(fair, exchange_quotes, strike, opt_type)
-            deribit_str = f"${best_deribit.mid:>9,.2f}" if best_deribit else f"{'---':>10s}"
-            aevo_str = f"${best_aevo.mid:>9,.2f}" if best_aevo else f"{'---':>10s}"
-            if edge:
-                best = best_market_price(exchange_quotes, strike, opt_type)
-                venue = best.exchange.upper()
-                marker = " \u25c6" if abs(edge.z_score) >= 1.0 else ""
-                if marker:
-                    has_edge = True
-                venue_str = f"\u2605 {venue:<7s}${best.ask:>9,.2f}"
-                edge_str = f"{edge.z_score:+.1f}\u03c3{marker}"
-            else:
-                venue_str = f"  {'---':<7s}{'---':>10s}"
-                edge_str = "---"
-            rows.append((strike, opt_type, fair, deribit_str, aevo_str, venue_str, edge_str))
+        call_side = _line_shopping_side(exchange_quotes, deribit_quotes, aevo_quotes, call_opts, strike, "call")
+        put_side = _line_shopping_side(exchange_quotes, deribit_quotes, aevo_quotes, put_opts, strike, "put")
+        if not call_side and not put_side:
+            continue
+        rows.append((strike, call_side, put_side))
     if not rows:
         return
     print(f"{BAR}")
     print(_section("MARKET LINE SHOPPING"))
-    hdr = f"{'Strike':>10s} {'Type':>4s} {'Synth Fair':>11s} {'Deribit':>10s} {'Aevo':>10s}  {'\u2605 Execute @':<18s} {'Edge':>8s}"
-    print(f"{BAR}    {hdr}")
-    print(f"{BAR}    {SEP * 79}")
-    for strike, opt_type, fair, deribit_str, aevo_str, venue_str, edge_str in rows:
-        ot = opt_type[0].upper()
-        print(f"{BAR}    {strike:>10,.0f} {ot:>4s} ${fair:>10,.2f} {deribit_str} {aevo_str}  {venue_str} {edge_str:>8s}")
-    print(f"{BAR}    {SEP * 79}")
-    if has_edge:
-        print(f"{BAR}    \u25c6 |z| \u2265 1.0 : Synth disagrees with market \u2014 edge detected")
-    print(f"{BAR}    \u2605 = best execution venue (lowest ask)")
+    side_hdr = (f"{'Synth':>{_W['synth']}s} {'DER':>{_W['der']}s} {'AEV':>{_W['aev']}s}"
+                f"  {'* Exec':>{_W['exec']}s} {'Edge':>{_W['edge']}s}")
+    strike_col = 8  # width of strike number
+    atm_col = 3     # width of ATM marker
+    sep = " \u2502 "
+    print(f"{BAR}    {'Strike':>{strike_col}s}{'':{atm_col}s} {'CALL':^{_SIDE_W}s}{sep}{'PUT':^{_SIDE_W}s}")
+    print(f"{BAR}    {'':{strike_col}s}{'':{atm_col}s} {side_hdr}{sep}{side_hdr}")
+    w = strike_col + atm_col + 1 + _SIDE_W + len(sep) + _SIDE_W
+    print(f"{BAR}    {SEP * w}")
+    atm_strike = nearby[min(range(len(nearby)), key=lambda i: abs(nearby[i] - current_price))]
+    for strike, call_side, put_side in rows:
+        atm = " \u25c0 " if strike == atm_strike else "   "
+        c_str = _fmt_side(call_side)
+        p_str = _fmt_side(put_side)
+        print(f"{BAR}    {strike:>{strike_col},.0f}{atm} {c_str}{sep}{p_str}")
+    print(f"{BAR}    {SEP * w}")
+    print(f"{BAR}    * Exec = best execution venue ask price (DER=Deribit, AEV=Aevo)")
 
 
 def screen_market_context(symbol: str, current_price: float, confidence: float,
