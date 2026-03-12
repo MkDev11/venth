@@ -1,0 +1,34 @@
+{
+  "instruments": [
+    {"instrument_name": "ETH-26FEB26-1950-C", "strike": 1950, "option_type": "call"},
+    {"instrument_name": "ETH-26FEB26-1950-P", "strike": 1950, "option_type": "put"},
+    {"instrument_name": "ETH-26FEB26-2000-C", "strike": 2000, "option_type": "call"},
+    {"instrument_name": "ETH-26FEB26-2000-P", "strike": 2000, "option_type": "put"},
+    {"instrument_name": "ETH-26FEB26-2025-C", "strike": 2025, "option_type": "call"},
+    {"instrument_name": "ETH-26FEB26-2025-P", "strike": 2025, "option_type": "put"},
+    {"instrument_name": "ETH-26FEB26-2050-C", "strike": 2050, "option_type": "call"},
+    {"instrument_name": "ETH-26FEB26-2050-P", "strike": 2050, "option_type": "put"},
+    {"instrument_name": "ETH-26FEB26-2075-C", "strike": 2075, "option_type": "call"},
+    {"instrument_name": "ETH-26FEB26-2075-P", "strike": 2075, "option_type": "put"},
+    {"instrument_name": "ETH-26FEB26-2100-C", "strike": 2100, "option_type": "call"},
+    {"instrument_name": "ETH-26FEB26-2100-P", "strike": 2100, "option_type": "put"},
+    {"instrument_name": "ETH-26FEB26-2150-C", "strike": 2150, "option_type": "call"},
+    {"instrument_name": "ETH-26FEB26-2150-P", "strike": 2150, "option_type": "put"}
+  ],
+  "order_books": {
+    "ETH-26FEB26-1950-C": {"bid": 99.50, "ask": 108.50, "mark_price": 103.94, "bid_iv": 61.2, "ask_iv": 63.5},
+    "ETH-26FEB26-1950-P": {"bid": 0.22, "ask": 0.38, "mark_price": 0.29, "bid_iv": 60.8, "ask_iv": 63.1},
+    "ETH-26FEB26-2000-C": {"bid": 54.00, "ask": 60.00, "mark_price": 56.87, "bid_iv": 60.5, "ask_iv": 62.8},
+    "ETH-26FEB26-2000-P": {"bid": 2.80, "ask": 3.70, "mark_price": 3.23, "bid_iv": 60.2, "ask_iv": 62.5},
+    "ETH-26FEB26-2025-C": {"bid": 34.50, "ask": 39.50, "mark_price": 36.81, "bid_iv": 60.0, "ask_iv": 62.3},
+    "ETH-26FEB26-2025-P": {"bid": 7.20, "ask": 9.20, "mark_price": 8.16, "bid_iv": 59.8, "ask_iv": 62.1},
+    "ETH-26FEB26-2050-C": {"bid": 19.00, "ask": 23.00, "mark_price": 20.97, "bid_iv": 59.5, "ask_iv": 61.8},
+    "ETH-26FEB26-2050-P": {"bid": 15.50, "ask": 19.50, "mark_price": 17.32, "bid_iv": 59.2, "ask_iv": 61.5},
+    "ETH-26FEB26-2075-C": {"bid": 9.50, "ask": 11.50, "mark_price": 10.45, "bid_iv": 59.0, "ask_iv": 61.3},
+    "ETH-26FEB26-2075-P": {"bid": 29.50, "ask": 34.50, "mark_price": 31.81, "bid_iv": 58.8, "ask_iv": 61.0},
+    "ETH-26FEB26-2100-C": {"bid": 3.80, "ask": 5.20, "mark_price": 4.46, "bid_iv": 58.5, "ask_iv": 60.8},
+    "ETH-26FEB26-2100-P": {"bid": 48.00, "ask": 54.00, "mark_price": 50.81, "bid_iv": 58.2, "ask_iv": 60.5},
+    "ETH-26FEB26-2150-C": {"bid": 0.42, "ask": 0.75, "mark_price": 0.57, "bid_iv": 58.0, "ask_iv": 60.3},
+    "ETH-26FEB26-2150-P": {"bid": 93.00, "ask": 101.00, "mark_price": 96.93, "bid_iv": 57.8, "ask_iv": 60.0}
+  }
+}
