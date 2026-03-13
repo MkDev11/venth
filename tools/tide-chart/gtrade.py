@@ -27,10 +27,12 @@ USDC_DECIMALS = 6
 USDC_COLLATERAL_INDEX = 3
 
 # Per-group protocol limits enforced by gTrade smart contracts
+# Source: https://docs.gains.trade/gtrade-leveraged-trading/asset-classes/
 GROUP_LIMITS = {
     "crypto": {"min_leverage": 2, "max_leverage": 150, "min_position_usd": 1500, "max_collateral_usd": 100_000},
-    "stocks": {"min_leverage": 2, "max_leverage": 150, "min_position_usd": 1500, "max_collateral_usd": 100_000},
+    "stocks": {"min_leverage": 1.1, "max_leverage": 50, "min_position_usd": 1500, "max_collateral_usd": 100_000},
     "commodities": {"min_leverage": 2, "max_leverage": 150, "min_position_usd": 1500, "max_collateral_usd": 100_000},
+    "commodities_t1": {"min_leverage": 2, "max_leverage": 250, "min_position_usd": 1500, "max_collateral_usd": 100_000},
 }
 
 # Tide Chart ticker -> gTrade pair mapping (all Synth API assets)
@@ -38,7 +40,7 @@ GTRADE_PAIRS = {
     "BTC": {"name": "BTC/USD", "group_index": 0, "group": "crypto"},
     "ETH": {"name": "ETH/USD", "group_index": 0, "group": "crypto"},
     "SOL": {"name": "SOL/USD", "group_index": 0, "group": "crypto"},
-    "XAU": {"name": "XAU/USD", "group_index": 4, "group": "commodities"},
+    "XAU": {"name": "XAU/USD", "group_index": 4, "group": "commodities_t1"},
     "SPY": {"name": "SPY/USD", "group_index": 3, "group": "stocks"},
     "NVDA": {"name": "NVDA/USD", "group_index": 3, "group": "stocks"},
     "TSLA": {"name": "TSLA/USD", "group_index": 3, "group": "stocks"},
@@ -58,6 +60,7 @@ GROUP_FEES = {
     "crypto": {"open_fee_pct": 0.06, "close_fee_pct": 0.06},
     "stocks": {"open_fee_pct": 0.01, "close_fee_pct": 0.01},
     "commodities": {"open_fee_pct": 0.01, "close_fee_pct": 0.01},
+    "commodities_t1": {"open_fee_pct": 0.01, "close_fee_pct": 0.01},
 }
 
 # US stock market hours (Eastern Time)
@@ -249,13 +252,37 @@ def fetch_open_trades(address: str) -> list[dict]:
         return []
 
 
+GTRADE_GLOBAL_BACKEND_URL = "https://backend-global.gains.trade"
+
+
 def fetch_trade_history(address: str) -> list[dict]:
     """Fetch historical trades (open & closed) for a wallet address.
+
+    Uses the new backend-global paginated endpoint (cursor-based) which
+    reliably includes liquidations, TP/SL hits, and partial closes.
+    Falls back to the legacy per-network endpoint on failure.
 
     Returns a list of trade history dicts, or empty list on failure.
     """
     if not address:
         return []
+    # Primary: backend-global endpoint (paginated, includes all close types)
+    try:
+        resp = requests.get(
+            f"{GTRADE_GLOBAL_BACKEND_URL}/api/personal-trading-history/{address.lower()}",
+            params={"chainId": ARBITRUM_CHAIN_ID, "limit": 50},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        # New endpoint wraps trades in a "data" key with cursor pagination
+        if isinstance(data, dict) and "data" in data:
+            return data["data"] if isinstance(data["data"], list) else []
+        if isinstance(data, list):
+            return data
+    except (requests.RequestException, ValueError, KeyError):
+        pass
+    # Fallback: legacy per-network endpoint (deprecated, may miss liquidations)
     try:
         resp = requests.get(
             f"{GTRADE_BACKEND_URL}/personal-trading-history-table/{address.lower()}",

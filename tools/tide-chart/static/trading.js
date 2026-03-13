@@ -22,8 +22,17 @@ var CHAINLINK_FEEDS = {
 /* Cached mapping from pairIndex -> asset ticker, populated by loadOpenTrades */
 var pairIndexToTicker = {};
 
-/* Cache of open trade metadata keyed by tradeIndex, used to record history on close */
-var _openTradesCache = {};
+/* Cache of open trade metadata keyed by tradeIndex, used to record history on close.
+   Persisted to sessionStorage so liquidation detection survives page refreshes. */
+var _OPEN_CACHE_KEY = 'tidechart_open_cache';
+var _openTradesCache = (function() {
+  try { var r = sessionStorage.getItem(_OPEN_CACHE_KEY); return r ? JSON.parse(r) : {}; } catch (_) { return {}; }
+})();
+function _persistOpenCache() {
+  try { sessionStorage.setItem(_OPEN_CACHE_KEY, JSON.stringify(_openTradesCache)); } catch (_) {}
+}
+/* Set of trade indices currently being closed by the user (to avoid false liquidation detection) */
+var _closingTradeIndices = {};
 var TRADE_HISTORY_KEY = 'tidechart_trade_history';
 
 function getTradeHistory() {
@@ -105,7 +114,7 @@ async function updateTradeTP(tradeIndex, remove) {
     if (tpSpan) tpSpan.textContent = remove ? '' : 'TP: $' + tpDisplay.toFixed(2);
     var tpInput = document.getElementById('manage-tp-' + tradeIndex);
     if (tpInput) tpInput.value = remove ? '' : tpDisplay.toFixed(2);
-    if (_openTradesCache[tradeIndex]) _openTradesCache[tradeIndex].tp = String(newTp);
+    if (_openTradesCache[tradeIndex]) { _openTradesCache[tradeIndex].tp = String(newTp); _persistOpenCache(); }
     pollOpenTrades(5, 6000);
   } catch (e) {
     var msg = e.reason || e.shortMessage || e.message || 'Update TP failed';
@@ -168,7 +177,7 @@ async function updateTradeSL(tradeIndex, remove) {
     if (slSpan) slSpan.textContent = remove ? '' : 'SL: $' + slDisplay.toFixed(2);
     var slInput = document.getElementById('manage-sl-' + tradeIndex);
     if (slInput) slInput.value = remove ? '' : slDisplay.toFixed(2);
-    if (_openTradesCache[tradeIndex]) _openTradesCache[tradeIndex].sl = String(newSl);
+    if (_openTradesCache[tradeIndex]) { _openTradesCache[tradeIndex].sl = String(newSl); _persistOpenCache(); }
     pollOpenTrades(5, 6000);
   } catch (e) {
     var msg = e.reason || e.shortMessage || e.message || 'Update SL failed';
@@ -253,6 +262,7 @@ async function decreasePosition(tradeIndex) {
       if (colSpan) colSpan.textContent = newCol.toFixed(2) + ' USDC';
       var newColRaw = BigInt(cached.collateralAmount || '0') - BigInt(collateralDelta);
       _openTradesCache[tradeIndex].collateralAmount = String(newColRaw);
+      _persistOpenCache();
     }
     pollOpenTrades(5, 6000);
   } catch (e) {
@@ -918,7 +928,51 @@ async function loadOpenTrades() {
     var data = await resp.json();
     var trades = data.trades || [];
     var pairNames = data.pair_names || {};
+
+    // Detect disappeared trades (likely liquidations) before resetting cache
+    var currentTradeIndices = {};
+    trades.forEach(function(item) {
+      var t = item.trade || item;
+      currentTradeIndices[parseInt(t.index || '0')] = true;
+    });
+    Object.keys(_openTradesCache).forEach(function(idx) {
+      if (!currentTradeIndices[idx] && !_closingTradeIndices[idx]) {
+        var cached = _openTradesCache[idx];
+        if (cached && cached.pairLabel) {
+          var colIdx = parseInt(cached.collateralIndex || '3');
+          var colDecimals = (colIdx === 3) ? 6 : 18;
+          var col = Number(BigInt(cached.collateralAmount || '0')) / Math.pow(10, colDecimals);
+          var entryPrice = cached.openPrice ? (parseFloat(cached.openPrice) / 1e10).toFixed(2) : '?';
+          // Determine close type: TP hit, SL hit, or liquidation
+          var hadTp = cached.tp && parseFloat(cached.tp) > 0;
+          var hadSl = cached.sl && parseFloat(cached.sl) > 0;
+          var closeType = 'liquidation';
+          var toastMsg = 'Position liquidated: ';
+          if (hadTp || hadSl) {
+            closeType = 'protocol_close';
+            toastMsg = 'Position closed by protocol (TP/SL): ';
+          }
+          var isLiq = closeType === 'liquidation';
+          saveTradeToHistory({
+            dir: cached.dir, lev: cached.lev, long: !!cached.long,
+            pairLabel: cached.pairLabel,
+            collateral: col.toFixed(2),
+            entryPrice: entryPrice,
+            closePrice: '?',
+            pnlUsd: isLiq ? (-col * 0.9).toFixed(2) : 'pending',
+            pnlPct: isLiq ? '-90.0' : 'pending',
+            txHash: null,
+            closedAt: new Date().toISOString(),
+            isLiquidation: isLiq
+          });
+          showToast(toastMsg + cached.dir + ' ' + cached.pairLabel + ' ' + cached.lev, isLiq ? 'error' : 'info', 8000);
+        }
+      }
+    });
+
     if (trades.length === 0) {
+      _openTradesCache = {};
+      _persistOpenCache();
       container.innerHTML = '<div class="no-trades">No open positions</div>';
       return;
     }
@@ -1080,6 +1134,7 @@ async function loadOpenTrades() {
       });
       return;
     }
+    _persistOpenCache();
     container.innerHTML = html;
   } catch (e) {
     container.innerHTML = '<div class="no-trades">Could not load trades</div>';
@@ -1157,6 +1212,7 @@ async function loadTradeHistory() {
       txHash: null,
       closedAt: null,
       isLiquidation: isLiquidation,
+      closeType: closeData.closeType !== undefined ? parseInt(closeData.closeType) : null,
       _source: 'backend'
     });
   });
@@ -1208,8 +1264,11 @@ async function loadTradeHistory() {
     var txLink = h.txHash
       ? ' <a href="https://arbiscan.io/tx/' + h.txHash + '" target="_blank" rel="noopener" style="color:var(--accent);font-size:10px">tx</a>'
       : '';
-    var badge = h.isLiquidation ? 'LIQUIDATED' : 'CLOSED';
-    var badgeClass = h.isLiquidation ? 'history-badge liq-badge' : 'history-badge';
+    var badge = 'CLOSED';
+    var badgeClass = 'history-badge';
+    if (h.isLiquidation) { badge = 'LIQUIDATED'; badgeClass = 'history-badge liq-badge'; }
+    else if (h.closeType === 1) { badge = 'TP HIT'; badgeClass = 'history-badge tp-badge'; }
+    else if (h.closeType === 2) { badge = 'SL HIT'; badgeClass = 'history-badge sl-badge'; }
     // Format timestamp
     var timeStr = '';
     if (h.closedAt) {
@@ -1251,6 +1310,7 @@ async function closeTrade(tradeIndex, pairIndex) {
     return;
   }
   tradePending = true;
+  _closingTradeIndices[tradeIndex] = true;
   try {
     // Resolve Chainlink feed dynamically from cached pair names
     var feedAddr = resolveFeedForPairIndex(pairIndex, pairIndexToTicker);
@@ -1299,6 +1359,7 @@ async function closeTrade(tradeIndex, pairIndex) {
     // Immediately update UI: remove closed trade from open positions list
     var cached = _openTradesCache[tradeIndex] || {};
     delete _openTradesCache[tradeIndex];
+    _persistOpenCache();
     var openContainer = document.getElementById('open-trades-list');
     if (openContainer) {
       var btns = openContainer.querySelectorAll('.close-trade-btn');
@@ -1369,6 +1430,7 @@ async function closeTrade(tradeIndex, pairIndex) {
     showToast(msg, 'error', 8000);
   } finally {
     tradePending = false;
+    delete _closingTradeIndices[tradeIndex];
   }
 }
 

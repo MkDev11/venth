@@ -44,6 +44,7 @@ from gtrade import (
     get_contract_config,
     get_asset_limits,
     fetch_open_trades,
+    fetch_trade_history,
     is_market_open,
     estimate_trade_fees,
     calculate_liquidation_price,
@@ -620,6 +621,32 @@ def test_gtrade_validate_min_position_size():
     assert "below minimum" in err.lower() or "Position size" in err
 
 
+def test_gtrade_pr30_leverage_limits():
+    """Regression: PR #30 fixed stock max leverage to 50 and added commodities_t1 (XAU) at 250."""
+    # Stocks: max leverage is 50, not 150
+    valid, err = validate_trade_params("TSLA", "long", 51, 200)
+    assert valid is False
+    assert "exceed" in err
+
+    valid, err = validate_trade_params("TSLA", "long", 50, 200)
+    assert valid is True
+
+    # Stocks: min leverage is 1.1
+    valid, err = validate_trade_params("SPY", "long", 1.1, 2000)
+    assert valid is True
+
+    # XAU: commodities_t1 group with max leverage 250
+    limits = get_asset_limits("XAU")
+    assert limits["max_leverage"] == 250
+
+    valid, err = validate_trade_params("XAU", "long", 250, 200)
+    assert valid is True
+
+    valid, err = validate_trade_params("XAU", "long", 251, 200)
+    assert valid is False
+    assert "exceed" in err
+
+
 def test_gtrade_build_trade_summary():
     s = build_trade_summary("NVDA", 950.0, "long", 10, 200)
     assert s["asset"] == "NVDA"
@@ -653,7 +680,11 @@ def test_gtrade_contract_config():
     assert "crypto" in cfg["group_limits"]
     assert "stocks" in cfg["group_limits"]
     assert "commodities" in cfg["group_limits"]
+    assert "commodities_t1" in cfg["group_limits"]
     assert cfg["group_limits"]["crypto"]["min_position_usd"] == 1500
+    assert cfg["group_limits"]["stocks"]["max_leverage"] == 50
+    assert cfg["group_limits"]["stocks"]["min_leverage"] == 1.1
+    assert cfg["group_limits"]["commodities_t1"]["max_leverage"] == 250
 
 
 def test_flask_gtrade_config_route():
@@ -903,11 +934,20 @@ def test_flask_validate_trade_includes_fees():
 
 def test_group_fees_structure():
     """Verify GROUP_FEES has expected groups and keys."""
-    for group in ["crypto", "stocks", "commodities"]:
+    for group in ["crypto", "stocks", "commodities", "commodities_t1"]:
         assert group in GROUP_FEES
         assert "open_fee_pct" in GROUP_FEES[group]
         assert "close_fee_pct" in GROUP_FEES[group]
         assert GROUP_FEES[group]["open_fee_pct"] > 0
+
+
+def test_estimate_trade_fees_xau():
+    """Verify XAU uses commodities_t1 fee tier, not crypto fallback."""
+    fees = estimate_trade_fees("XAU", 200, 100)
+    assert fees["position_usd"] == 20000.0
+    # commodities_t1 fee is 0.01%, not crypto 0.06%
+    assert fees["fee_pct"] == 0.01
+    assert abs(fees["open_fee"] - 2.0) < 0.01
 
 
 def test_liq_threshold_constant():
@@ -924,6 +964,22 @@ def test_dashboard_html_contains_new_css():
     assert 'liq-price' in html
     assert 'fee-estimate' in html
     assert 'market-warning' in html
+    # TP/SL/LIQ badge styles
+    assert 'tp-badge' in html
+    assert 'sl-badge' in html
+    assert 'liq-badge' in html
+
+
+def test_fetch_trade_history_empty_address():
+    """Verify fetch_trade_history returns empty list for empty address."""
+    result = fetch_trade_history("")
+    assert result == []
+
+
+def test_backend_global_url():
+    """Verify the backend-global URL constant is set."""
+    from gtrade import GTRADE_GLOBAL_BACKEND_URL
+    assert "backend-global.gains.trade" in GTRADE_GLOBAL_BACKEND_URL
 
 
 if __name__ == "__main__":
@@ -997,4 +1053,8 @@ if __name__ == "__main__":
     test_group_fees_structure()
     test_liq_threshold_constant()
     test_dashboard_html_contains_new_css()
+    test_gtrade_pr30_leverage_limits()
+    test_estimate_trade_fees_xau()
+    test_fetch_trade_history_empty_address()
+    test_backend_global_url()
     print("All tests passed!")
