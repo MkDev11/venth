@@ -242,7 +242,10 @@ def edge():
         client = get_client()
         if market_type in ("daily", "hourly", "15min", "5min"):
             return _handle_updown_market(client, slug, asset, market_type, live_prob_up, platform)
-        # range
+        # Kalshi "range" contracts are binary Yes/No — route through up/down handler
+        if market_type == "range" and platform == PLATFORM_KALSHI:
+            return _handle_updown_market(client, slug, asset, "daily", live_prob_up, platform)
+        # Polymarket range (multi-bracket)
         data = client.get_polymarket_range()
         if not isinstance(data, list):
             return jsonify({"error": "Invalid range data"}), 500
