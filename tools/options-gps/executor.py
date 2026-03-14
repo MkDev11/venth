@@ -1,11 +1,9 @@
 """Autonomous execution engine for Options GPS.
 Consumes pipeline data classes and exchange pricing. Supports Deribit (JSON-RPC),
-Aevo (REST + HMAC), and dry-run simulation. Auto-routing uses leg_divergences per leg.
+Aevo (REST + EIP-712 L2 signing), and dry-run simulation. Auto-routing uses leg_divergences per leg.
 Features: order lifecycle (place/status/cancel), slippage protection, order monitoring
 with timeout, retry on transient errors, partial-fill cancellation."""
 
-import hashlib
-import hmac
 import json
 import os
 import time
@@ -231,10 +229,10 @@ def _deribit_rpc(base_url: str, method: str, params: dict, token: str | None) ->
                 headers=headers,
                 timeout=10,
             )
-            resp.raise_for_status()
-            data = resp.json()
+            data = resp.json() if resp.content else {}
             if "error" in data:
                 raise RuntimeError(data["error"].get("message", str(data["error"])))
+            resp.raise_for_status()
             return data.get("result", {})
         except Exception as e:
             if _is_retryable(e) and attempt < 2:
@@ -396,43 +394,176 @@ class DeribitExecutor(BaseExecutor):
             return False
 
 
-class AevoExecutor(BaseExecutor):
-    """Executes orders on Aevo via REST with HMAC-SHA256 signing."""
+def _aevo_eip712_domain_separator(name: str, version: str, chain_id: int) -> bytes:
+    """Compute EIP-712 domain separator for Aevo (no verifyingContract/salt)."""
+    from eth_abi import encode as abi_encode
+    from eth_hash.auto import keccak
+    domain_type_hash = keccak(
+        b"EIP712Domain(string name,string version,uint256 chainId)"
+    )
+    return keccak(
+        domain_type_hash
+        + keccak(name.encode())
+        + keccak(version.encode())
+        + abi_encode(["uint256"], [chain_id])
+    )
 
-    def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
+
+def _aevo_order_struct_hash(
+    maker: str, is_buy: bool, limit_price: int, amount: int,
+    salt: int, instrument_id: int, timestamp: int,
+) -> bytes:
+    """Compute EIP-712 struct hash for an Aevo Order."""
+    from eth_abi import encode as abi_encode
+    from eth_hash.auto import keccak
+    order_type_hash = keccak(
+        b"Order(address maker,bool isBuy,uint256 limitPrice,uint256 amount,"
+        b"uint256 salt,uint256 instrument,uint256 timestamp)"
+    )
+    return keccak(
+        order_type_hash
+        + abi_encode(
+            ["address", "bool", "uint256", "uint256", "uint256", "uint256", "uint256"],
+            [maker, is_buy, limit_price, amount, salt, instrument_id, timestamp],
+        )
+    )
+
+
+_AEVO_SIGNING_DOMAINS = {
+    "testnet": {"name": "Aevo Testnet", "version": "1", "chain_id": 11155111},
+    "mainnet": {"name": "Aevo Mainnet", "version": "1", "chain_id": 1},
+}
+
+_AEVO_DECIMALS = 10**6
+
+
+class AevoExecutor(BaseExecutor):
+    """Executes orders on Aevo via REST with EIP-712 L2 order signing.
+    Requires: api_key, api_secret (for REST auth headers), signing_key (Ethereum
+    private key for EIP-712 order signatures), and wallet_address (maker address)."""
+
+    def __init__(
+        self, api_key: str, api_secret: str, signing_key: str,
+        wallet_address: str, testnet: bool = False,
+    ):
         self.api_key = api_key
         self.api_secret = api_secret
+        self.signing_key = signing_key
+        self.wallet_address = wallet_address
+        self.testnet = testnet
         self.base_url = (
             "https://api-testnet.aevo.xyz" if testnet else "https://api.aevo.xyz"
         )
+        env = "testnet" if testnet else "mainnet"
+        domain_cfg = _AEVO_SIGNING_DOMAINS[env]
+        self._domain_separator = _aevo_eip712_domain_separator(
+            domain_cfg["name"], domain_cfg["version"], domain_cfg["chain_id"],
+        )
+        self._instrument_cache: dict[str, int] = {}  # "BTC-71000-C" -> numeric id
 
-    def _sign(self, timestamp: str, method: str, path: str, body: str) -> str:
-        message = f"{timestamp}{method}{path}{body}"
-        return hmac.new(
-            self.api_secret.encode(), message.encode(), hashlib.sha256,
-        ).hexdigest()
-
-    def _headers(self, method: str = "POST", path: str = "/orders", body: str = "") -> dict:
-        ts = str(int(time.time()))
+    def _headers(self) -> dict:
         return {
             "AEVO-KEY": self.api_key,
-            "AEVO-TIMESTAMP": ts,
-            "AEVO-SIGNATURE": self._sign(ts, method, path, body),
+            "AEVO-SECRET": self.api_secret,
             "Content-Type": "application/json",
         }
 
+    def _resolve_instrument_id(self, instrument_name: str, asset: str = "BTC") -> int | None:
+        """Resolve instrument name to numeric Aevo instrument ID via /markets.
+        Our names (e.g. BTC-71000-C) omit the expiry date that Aevo includes
+        (e.g. BTC-27MAR26-71000-C), so we fall back to matching by strike + type."""
+        if instrument_name in self._instrument_cache:
+            return self._instrument_cache[instrument_name]
+        try:
+            resp = requests.get(
+                f"{self.base_url}/markets?asset={asset}&instrument_type=OPTION",
+                timeout=10,
+            )
+            resp.raise_for_status()
+            for market in resp.json():
+                mname = market.get("instrument_name", "")
+                mid = market.get("instrument_id")
+                if mid is not None:
+                    self._instrument_cache[mname] = int(mid)
+        except Exception:
+            pass  # fall through to fuzzy match on whatever's already cached
+        # Exact match (works if names happen to align)
+        if instrument_name in self._instrument_cache:
+            return self._instrument_cache[instrument_name]
+        # Fuzzy match: our name is "BTC-71000-C", Aevo's is "BTC-27MAR26-71000-C"
+        # Match by strike + option type suffix (last two segments)
+        parts = instrument_name.rsplit("-", 2)
+        if len(parts) >= 3:
+            target_suffix = f"-{parts[-2]}-{parts[-1]}"  # "-71000-C"
+        elif len(parts) == 2:
+            target_suffix = f"-{parts[-1]}"
+        else:
+            return None
+        for mname, mid in self._instrument_cache.items():
+            if mname.startswith(asset) and mname.endswith(target_suffix):
+                self._instrument_cache[instrument_name] = mid  # cache alias
+                return mid
+        return None
+
+    def _sign_order(
+        self, is_buy: bool, limit_price: float, quantity: int,
+        instrument_id: int, timestamp: int,
+    ) -> tuple[int, str]:
+        """EIP-712 sign an order. Returns (salt, signature_hex)."""
+        import random
+        from eth_account import Account
+        from eth_hash.auto import keccak
+        salt = random.randint(0, 10**10)
+        price_scaled = int(round(limit_price * _AEVO_DECIMALS))
+        amount_scaled = int(round(quantity * _AEVO_DECIMALS))
+        struct_hash = _aevo_order_struct_hash(
+            maker=self.wallet_address,
+            is_buy=is_buy,
+            limit_price=price_scaled,
+            amount=amount_scaled,
+            salt=salt,
+            instrument_id=instrument_id,
+            timestamp=timestamp,
+        )
+        digest = keccak(b"\x19\x01" + self._domain_separator + struct_hash)
+        sig = Account._sign_hash(digest, self.signing_key)
+        return salt, f"0x{sig.signature.hex()}"
+
     def authenticate(self) -> bool:
-        return bool(self.api_key and self.api_secret)
+        return bool(self.api_key and self.api_secret and self.signing_key and self.wallet_address)
 
     def place_order(self, order: OrderRequest) -> OrderResult:
+        asset = order.instrument.split("-")[0] if "-" in order.instrument else "BTC"
+        instrument_id = self._resolve_instrument_id(order.instrument, asset)
+        if instrument_id is None:
+            return OrderResult(
+                order_id="", status="error", fill_price=0.0, fill_quantity=0,
+                instrument=order.instrument, action=order.action, exchange="aevo",
+                error=f"Cannot resolve instrument ID for '{order.instrument}'",
+                timestamp=_now_iso(),
+            )
+        is_buy = order.action == "BUY"
+        timestamp = int(time.time())
+        salt, signature = self._sign_order(
+            is_buy=is_buy,
+            limit_price=order.price,
+            quantity=order.quantity,
+            instrument_id=instrument_id,
+            timestamp=timestamp,
+        )
         payload = {
-            "instrument": order.instrument,
-            "side": order.action.lower(),
-            "quantity": order.quantity,
-            "order_type": order.order_type,
+            "maker": self.wallet_address,
+            "is_buy": is_buy,
+            "instrument": instrument_id,
+            "limit_price": str(int(round(order.price * _AEVO_DECIMALS))),
+            "amount": str(int(round(order.quantity * _AEVO_DECIMALS))),
+            "salt": str(salt),
+            "signature": signature,
+            "timestamp": timestamp,
+            "post_only": False,
+            "reduce_only": False,
+            "close_position": False,
         }
-        if order.order_type == "limit":
-            payload["price"] = order.price
         body = json.dumps(payload)
         last_err = None
         t0 = time.monotonic()
@@ -441,19 +572,28 @@ class AevoExecutor(BaseExecutor):
                 resp = requests.post(
                     f"{self.base_url}/orders",
                     data=body,
-                    headers=self._headers("POST", "/orders", body),
+                    headers=self._headers(),
                     timeout=10,
                 )
-                resp.raise_for_status()
+                if resp.status_code >= 400:
+                    try:
+                        err_body = resp.json()
+                        raise RuntimeError(err_body.get("error", resp.text))
+                    except (ValueError, KeyError):
+                        resp.raise_for_status()
                 latency = int((time.monotonic() - t0) * 1000)
                 data = resp.json()
-                fill_price = float(data.get("avg_price", 0))
+                # Aevo returns prices/amounts as scaled integers (×10^6)
+                raw_price = float(data.get("avg_price") or data.get("price", "0"))
+                fill_price = raw_price / _AEVO_DECIMALS
+                raw_filled = float(data.get("filled", "0"))
+                fill_qty = max(1, int(raw_filled / _AEVO_DECIMALS)) if raw_filled > 0 else 0
                 slip = _slippage_pct(order.price, fill_price, order.action) if fill_price > 0 else 0.0
                 return OrderResult(
                     order_id=data.get("order_id", ""),
-                    status=data.get("status", "error"),
+                    status=data.get("order_status", data.get("status", "error")),
                     fill_price=fill_price,
-                    fill_quantity=int(data.get("filled", 0)),
+                    fill_quantity=fill_qty or order.quantity,
                     instrument=order.instrument,
                     action=order.action,
                     exchange="aevo",
@@ -478,22 +618,21 @@ class AevoExecutor(BaseExecutor):
         )
 
     def get_order_status(self, order_id: str) -> OrderResult:
-        path = f"/orders/{order_id}"
         try:
             resp = requests.get(
-                f"{self.base_url}{path}",
-                headers=self._headers("GET", path),
+                f"{self.base_url}/orders/{order_id}",
+                headers=self._headers(),
                 timeout=10,
             )
             resp.raise_for_status()
             data = resp.json()
             return OrderResult(
                 order_id=data.get("order_id", order_id),
-                status=data.get("status", "error"),
+                status=data.get("order_status", data.get("status", "error")),
                 fill_price=float(data.get("avg_price", 0)),
                 fill_quantity=int(data.get("filled", 0)),
-                instrument=data.get("instrument", ""),
-                action=data.get("side", "").upper(),
+                instrument=data.get("instrument_name", ""),
+                action="BUY" if data.get("side") == "buy" or data.get("is_buy") else "SELL",
                 exchange="aevo",
                 timestamp=_now_iso(),
             )
@@ -505,11 +644,10 @@ class AevoExecutor(BaseExecutor):
             )
 
     def cancel_order(self, order_id: str) -> bool:
-        path = f"/orders/{order_id}"
         try:
             resp = requests.delete(
-                f"{self.base_url}{path}",
-                headers=self._headers("DELETE", path),
+                f"{self.base_url}/orders/{order_id}",
+                headers=self._headers(),
                 timeout=10,
             )
             resp.raise_for_status()
@@ -765,13 +903,20 @@ def get_executor(
     if exchange == "aevo":
         api_key = os.environ.get("AEVO_API_KEY", "")
         api_secret = os.environ.get("AEVO_API_SECRET", "")
+        signing_key = os.environ.get("AEVO_SIGNING_KEY", "")
+        wallet_address = os.environ.get("AEVO_WALLET_ADDRESS", "")
         if not api_key or not api_secret:
             raise ValueError(
                 "Aevo credentials required: set AEVO_API_KEY and "
                 "AEVO_API_SECRET environment variables"
             )
+        if not signing_key or not wallet_address:
+            raise ValueError(
+                "Aevo L2 signing credentials required: set AEVO_SIGNING_KEY "
+                "(Ethereum private key) and AEVO_WALLET_ADDRESS environment variables"
+            )
         testnet = os.environ.get("AEVO_TESTNET", "").strip() == "1"
-        return AevoExecutor(api_key, api_secret, testnet)
+        return AevoExecutor(api_key, api_secret, signing_key, wallet_address, testnet)
     raise ValueError(
         f"Unknown exchange '{exchange}'. Use --exchange deribit or --exchange aevo"
     )

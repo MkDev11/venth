@@ -352,7 +352,17 @@ class TestGetExecutor:
     def test_missing_aevo_creds(self, sample_exchange_quotes, monkeypatch):
         monkeypatch.delenv("AEVO_API_KEY", raising=False)
         monkeypatch.delenv("AEVO_API_SECRET", raising=False)
+        monkeypatch.delenv("AEVO_SIGNING_KEY", raising=False)
+        monkeypatch.delenv("AEVO_WALLET_ADDRESS", raising=False)
         with pytest.raises(ValueError, match="AEVO_API_KEY"):
+            get_executor("aevo", sample_exchange_quotes, dry_run=False)
+
+    def test_missing_aevo_signing_creds(self, sample_exchange_quotes, monkeypatch):
+        monkeypatch.setenv("AEVO_API_KEY", "test-key")
+        monkeypatch.setenv("AEVO_API_SECRET", "test-secret")
+        monkeypatch.delenv("AEVO_SIGNING_KEY", raising=False)
+        monkeypatch.delenv("AEVO_WALLET_ADDRESS", raising=False)
+        with pytest.raises(ValueError, match="AEVO_SIGNING_KEY"):
             get_executor("aevo", sample_exchange_quotes, dry_run=False)
 
     def test_unknown_exchange(self, sample_exchange_quotes):
