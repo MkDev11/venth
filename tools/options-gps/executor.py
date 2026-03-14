@@ -366,12 +366,18 @@ class DeribitExecutor(BaseExecutor):
                 self.base_url, "private/get_order_state",
                 {"order_id": order_id}, self.token,
             )
+            fill_price_btc = float(result.get("average_price", 0))
+            # Convert BTC fill price to USD for pipeline consistency
+            instrument = result.get("instrument_name", "")
+            asset = instrument.split("-")[0] if "-" in instrument else "BTC"
+            index_price = self._get_index_price(asset)
+            fill_price_usd = fill_price_btc * index_price if index_price > 0 else fill_price_btc
             return OrderResult(
                 order_id=result.get("order_id", order_id),
                 status=result.get("order_state", "error"),
-                fill_price=float(result.get("average_price", 0)),
+                fill_price=round(fill_price_usd, 2),
                 fill_quantity=int(result.get("filled_amount", 0)),
-                instrument=result.get("instrument_name", ""),
+                instrument=instrument,
                 action="BUY" if result.get("direction") == "buy" else "SELL",
                 exchange="deribit",
                 timestamp=_now_iso(),
